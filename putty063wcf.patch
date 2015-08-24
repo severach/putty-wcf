@@ -1,0 +1,3733 @@
+diff -r -C2 config.c.orig config.c
+*** config.c.orig	Sun Jul 14 06:46:42 2013
+--- config.c	Sat Apr 26 03:37:48 2014
+***************
+*** 482,485 ****
+--- 482,488 ----
+  	    dlg_listbox_clear(ctrl, dlg);
+  	    dlg_listbox_add(ctrl, dlg, PRINTER_DISABLED_STRING);
++ #ifdef PRINT_TO_CLIPBOARD_STRING
++ 	    dlg_listbox_add(ctrl, dlg, PRINT_TO_CLIPBOARD_STRING);
++ #endif
+  	    pe = printer_start_enum(&nprinters);
+  	    for (i = 0; i < nprinters; i++)
+***************
+*** 669,673 ****
+  	    }
+              {
+!                 char *errmsg = save_settings(ssd->savedsession, conf);
+                  if (errmsg) {
+                      dlg_error_msg(dlg, errmsg);
+--- 672,676 ----
+  	    }
+              {
+!                 char *errmsg = save_settings(ssd->savedsession, conf, ssd->loadbutton==NULL);
+                  if (errmsg) {
+                      dlg_error_msg(dlg, errmsg);
+***************
+*** 1486,1490 ****
+  		      I(CONF_funky_type),
+  		      "ESC[n~", I(0), "Linux", I(1), "Xterm R6", I(2),
+! 		      "VT400", I(3), "VT100+", I(4), "SCO", I(5), NULL);
+  
+      s = ctrl_getset(b, "Terminal/Keyboard", "appkeypad",
+--- 1489,1493 ----
+  		      I(CONF_funky_type),
+  		      "ESC[n~", I(0), "Linux", I(1), "Xterm R6", I(2),
+! 		      "VT400", I(3), "VT100+", I(4), "SCO", I(5), "Xterm New", I(6), NULL);
+  
+      s = ctrl_getset(b, "Terminal/Keyboard", "appkeypad",
+diff -r -C2 putty.h.orig putty.h
+*** putty.h.orig	Fri Jul 19 13:44:28 2013
+--- putty.h	Sat Apr 26 03:35:58 2014
+***************
+*** 334,338 ****
+      FUNKY_VT400,
+      FUNKY_VT100P,
+!     FUNKY_SCO
+  };
+  
+--- 334,339 ----
+      FUNKY_VT400,
+      FUNKY_VT100P,
+!     FUNKY_SCO,
+!     FUNKY_XTERMNEW
+  };
+  
+***************
+*** 929,934 ****
+  Backend *backend_from_proto(int proto);
+  char *get_remote_username(Conf *conf); /* dynamically allocated */
+! char *save_settings(char *section, Conf *conf);
+! void save_open_settings(void *sesskey, Conf *conf);
+  void load_settings(char *section, Conf *conf);
+  void load_open_settings(void *sesskey, Conf *conf);
+--- 930,935 ----
+  Backend *backend_from_proto(int proto);
+  char *get_remote_username(Conf *conf); /* dynamically allocated */
+! char *save_settings(char *section, Conf *conf, int partial);
+! void save_open_settings(void *sesskey, Conf *conf, int partial);
+  void load_settings(char *section, Conf *conf);
+  void load_open_settings(void *sesskey, Conf *conf);
+***************
+*** 1402,1412 ****
+  #endif
+  
+! /* SURROGATE PAIR */
+! #ifndef IS_HIGH_SURROGATE
+  #define HIGH_SURROGATE_START 0xd800
+  #define HIGH_SURROGATE_END 0xdbff
+  #define LOW_SURROGATE_START 0xdc00
+  #define LOW_SURROGATE_END 0xdfff
+  
+  #define IS_HIGH_SURROGATE(wch) (((wch) >= HIGH_SURROGATE_START) && \
+                                  ((wch) <= HIGH_SURROGATE_END))
+--- 1403,1415 ----
+  #endif
+  
+! #ifndef HIGH_SURROGATE_START /* not defined in MinGW */
+  #define HIGH_SURROGATE_START 0xd800
+  #define HIGH_SURROGATE_END 0xdbff
+  #define LOW_SURROGATE_START 0xdc00
+  #define LOW_SURROGATE_END 0xdfff
++ #endif
+  
++ /* SURROGATE PAIR */
++ #ifndef IS_HIGH_SURROGATE
+  #define IS_HIGH_SURROGATE(wch) (((wch) >= HIGH_SURROGATE_START) && \
+                                  ((wch) <= HIGH_SURROGATE_END))
+***************
+*** 1427,1429 ****
+--- 1430,1434 ----
+      (0x10000 + (((wch1) & 0x3FF) << 10) + ((wch2) & 0x3FF))
+  
++ #define PRINT_TO_CLIPBOARD_STRING "(Windows Clipboard)" /* Comment this out to disable clipboard printer */
++ 
+  #endif
+diff -r -C2 settings.c.orig settings.c
+*** settings.c.orig	Fri Aug  2 18:33:40 2013
+--- settings.c	Thu May  1 00:19:38 2014
+***************
+*** 371,374 ****
+--- 371,439 ----
+  }
+  
++ /* PuTTY's config screen is clumsy so I hand edit REG files. Unfortunately the many defaults
++  * clutter everything up. We'll not write most of them to make hand editing easier. */
++ /* How do I choose which defaults get deleted?
++  * 1. Settings I've never used.
++  * 2. Settings that are unlikely to ever change default (see #1).
++  * 3. Don't delete any settings that require math or are related to other settings.
++  * 4. Don't delete any setting set by a #define that might be changed on a whim or by platform.
++  * 5. Don't delete settings programs other than PuTTY might use
++  */
++ static void write_setting_i_del_raw(void *handle, const char *key, int i, int dflt) {
++   if (i == dflt)
++     write_setting_s(handle, key, NULL);
++   else
++     write_setting_i(handle, key, i);
++ }
++ static void write_setting_i_del(void *handle, const char *key, Conf *conf, int def, int dflt) {
++   int i = (def==-1)?dflt:conf_get_int(conf, def);
++   if (i == platform_default_i(key, dflt)) /* platform_default_i() doesn't do anything */
++     write_setting_s(handle, key, NULL);
++   else
++     write_setting_i(handle, key, i);
++ }
++ 
++ static char *platform_default_s2(const char *name,const char *dflt) {
++   char *p=platform_default_s(name);
++   return p?p:dupstr(dflt);
++ }
++ 
++ static void write_setting_s_del(void *handle, const char *key, Conf *conf, int def, const char *dflt) {
++   char *i = (def==-1)?(char *)conf:conf_get_str(conf, def);
++   char *p = platform_default_s2(key,dflt);
++   if (0==strcmp(i,p)) i=NULL;
++   sfree(p);
++   write_setting_s(handle, key, i);
++ }
++ 
++ static void write_setting_filename_del(void *handle, const char *key, Conf *conf, int def) {
++   Filename *i = conf_get_filename(conf, def);
++   Filename *p = platform_default_filename(key);
++   if (0==strcmp(i->path,p->path)) 
++     write_setting_s(handle, key, NULL);
++   else
++     write_setting_s(handle, key, i->path);
++   sfree(p);
++ }
++ 
++ static const char *const Colourxx_defaults[] = {
++     "187,187,187", "255,255,255", "0,0,0", "85,85,85", "0,0,0",
++     "0,255,0", "0,0,0", "85,85,85", "187,0,0", "255,85,85",
++     "0,187,0", "85,255,85", "187,187,0", "255,255,85", "0,0,187",
++     "85,85,255", "187,0,187", "255,85,255", "0,187,187",
++     "85,255,255", "187,187,187", "255,255,255"
++ };
++ 
++ static const char *const Wordnessxx_defaults[] = {
++     "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
++     "0,1,2,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1",
++     "1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,2",
++     "1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1",
++     "1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1",
++     "1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1",
++     "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,2,2,2,2,2,2,2,2",
++     "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,2,2,2,2,2,2,2,2"
++ };
++ 
+  /* 
+   * Write out a preference list.
+***************
+*** 408,412 ****
+  }
+  
+! char *save_settings(char *section, Conf *conf)
+  {
+      void *sesskey;
+--- 473,477 ----
+  }
+  
+! char *save_settings(char *section, Conf *conf, int partial)
+  {
+      void *sesskey;
+***************
+*** 416,437 ****
+      if (!sesskey)
+  	return errmsg;
+!     save_open_settings(sesskey, conf);
+      close_settings_w(sesskey);
+      return NULL;
+  }
+  
+! void save_open_settings(void *sesskey, Conf *conf)
+  {
+      int i;
+      char *p;
+  
+      write_setting_i(sesskey, "Present", 1);
+!     write_setting_s(sesskey, "HostName", conf_get_str(conf, CONF_host));
+!     write_setting_filename(sesskey, "LogFileName", conf_get_filename(conf, CONF_logfilename));
+!     write_setting_i(sesskey, "LogType", conf_get_int(conf, CONF_logtype));
+!     write_setting_i(sesskey, "LogFileClash", conf_get_int(conf, CONF_logxfovr));
+!     write_setting_i(sesskey, "LogFlush", conf_get_int(conf, CONF_logflush));
+!     write_setting_i(sesskey, "SSHLogOmitPasswords", conf_get_int(conf, CONF_logomitpass));
+!     write_setting_i(sesskey, "SSHLogOmitData", conf_get_int(conf, CONF_logomitdata));
+      p = "raw";
+      {
+--- 481,503 ----
+      if (!sesskey)
+  	return errmsg;
+!     save_open_settings(sesskey, conf, partial);
+      close_settings_w(sesskey);
+      return NULL;
+  }
+  
+! void save_open_settings(void *sesskey, Conf *conf, int partial)
+  {
+      int i;
+      char *p;
+  
++     if (partial && 0==read_setting_i(sesskey, "Present", 0)) partial=0; /* Write everything to a new entry */
+      write_setting_i(sesskey, "Present", 1);
+!     if (!partial) write_setting_s(sesskey, "HostName", conf_get_str(conf, CONF_host));
+!     write_setting_filename_del(sesskey, "LogFileName", conf, CONF_logfilename);
+!     write_setting_i_del(sesskey, "LogType", conf, CONF_logtype, 0);
+!     write_setting_i_del(sesskey, "LogFileClash", conf, CONF_logxfovr, LGXF_ASK);
+!     write_setting_i_del(sesskey, "LogFlush", conf, CONF_logflush, 1);
+!     write_setting_i_del(sesskey, "SSHLogOmitPasswords", conf, CONF_logomitpass, 1);
+!     write_setting_i_del(sesskey, "SSHLogOmitData", conf, CONF_logomitdata, 0);
+      p = "raw";
+      {
+***************
+*** 440,445 ****
+  	    p = b->name;
+      }
+!     write_setting_s(sesskey, "Protocol", p);
+!     write_setting_i(sesskey, "PortNumber", conf_get_int(conf, CONF_port));
+      /* The CloseOnExit numbers are arranged in a different order from
+       * the standard FORCE_ON / FORCE_OFF / AUTO. */
+--- 506,511 ----
+  	    p = b->name;
+      }
+!     if (!partial) write_setting_s(sesskey, "Protocol", p);
+!     if (!partial) write_setting_i(sesskey, "PortNumber", conf_get_int(conf, CONF_port));
+      /* The CloseOnExit numbers are arranged in a different order from
+       * the standard FORCE_ON / FORCE_OFF / AUTO. */
+***************
+*** 448,455 ****
+      write_setting_i(sesskey, "PingInterval", conf_get_int(conf, CONF_ping_interval) / 60);	/* minutes */
+      write_setting_i(sesskey, "PingIntervalSecs", conf_get_int(conf, CONF_ping_interval) % 60);	/* seconds */
+!     write_setting_i(sesskey, "TCPNoDelay", conf_get_int(conf, CONF_tcp_nodelay));
+!     write_setting_i(sesskey, "TCPKeepalives", conf_get_int(conf, CONF_tcp_keepalives));
+      write_setting_s(sesskey, "TerminalType", conf_get_str(conf, CONF_termtype));
+!     write_setting_s(sesskey, "TerminalSpeed", conf_get_str(conf, CONF_termspeed));
+      wmap(sesskey, "TerminalModes", conf, CONF_ttymodes);
+  
+--- 514,521 ----
+      write_setting_i(sesskey, "PingInterval", conf_get_int(conf, CONF_ping_interval) / 60);	/* minutes */
+      write_setting_i(sesskey, "PingIntervalSecs", conf_get_int(conf, CONF_ping_interval) % 60);	/* seconds */
+!     write_setting_i_del(sesskey, "TCPNoDelay", conf, CONF_tcp_nodelay, 1);
+!     write_setting_i_del(sesskey, "TCPKeepalives", conf, CONF_tcp_keepalives, 0);
+      write_setting_s(sesskey, "TerminalType", conf_get_str(conf, CONF_termtype));
+!     write_setting_s_del(sesskey, "TerminalSpeed", conf, CONF_termspeed, "38400,38400");
+      wmap(sesskey, "TerminalModes", conf, CONF_ttymodes);
+  
+***************
+*** 460,557 ****
+      write_setting_s(sesskey, "ProxyExcludeList", conf_get_str(conf, CONF_proxy_exclude_list));
+      write_setting_i(sesskey, "ProxyDNS", (conf_get_int(conf, CONF_proxy_dns)+2)%3);
+!     write_setting_i(sesskey, "ProxyLocalhost", conf_get_int(conf, CONF_even_proxy_localhost));
+      write_setting_i(sesskey, "ProxyMethod", conf_get_int(conf, CONF_proxy_type));
+!     write_setting_s(sesskey, "ProxyHost", conf_get_str(conf, CONF_proxy_host));
+!     write_setting_i(sesskey, "ProxyPort", conf_get_int(conf, CONF_proxy_port));
+!     write_setting_s(sesskey, "ProxyUsername", conf_get_str(conf, CONF_proxy_username));
+!     write_setting_s(sesskey, "ProxyPassword", conf_get_str(conf, CONF_proxy_password));
+!     write_setting_s(sesskey, "ProxyTelnetCommand", conf_get_str(conf, CONF_proxy_telnet_command));
+      wmap(sesskey, "Environment", conf, CONF_environmt);
+      write_setting_s(sesskey, "UserName", conf_get_str(conf, CONF_username));
+!     write_setting_i(sesskey, "UserNameFromEnvironment", conf_get_int(conf, CONF_username_from_env));
+!     write_setting_s(sesskey, "LocalUserName", conf_get_str(conf, CONF_localusername));
+!     write_setting_i(sesskey, "NoPTY", conf_get_int(conf, CONF_nopty));
+!     write_setting_i(sesskey, "Compression", conf_get_int(conf, CONF_compression));
+!     write_setting_i(sesskey, "TryAgent", conf_get_int(conf, CONF_tryagent));
+!     write_setting_i(sesskey, "AgentFwd", conf_get_int(conf, CONF_agentfwd));
+!     write_setting_i(sesskey, "GssapiFwd", conf_get_int(conf, CONF_gssapifwd));
+!     write_setting_i(sesskey, "ChangeUsername", conf_get_int(conf, CONF_change_username));
+      wprefs(sesskey, "Cipher", ciphernames, CIPHER_MAX, conf, CONF_ssh_cipherlist);
+      wprefs(sesskey, "KEX", kexnames, KEX_MAX, conf, CONF_ssh_kexlist);
+!     write_setting_i(sesskey, "RekeyTime", conf_get_int(conf, CONF_ssh_rekey_time));
+!     write_setting_s(sesskey, "RekeyBytes", conf_get_str(conf, CONF_ssh_rekey_data));
+!     write_setting_i(sesskey, "SshNoAuth", conf_get_int(conf, CONF_ssh_no_userauth));
+!     write_setting_i(sesskey, "SshBanner", conf_get_int(conf, CONF_ssh_show_banner));
+!     write_setting_i(sesskey, "AuthTIS", conf_get_int(conf, CONF_try_tis_auth));
+!     write_setting_i(sesskey, "AuthKI", conf_get_int(conf, CONF_try_ki_auth));
+!     write_setting_i(sesskey, "AuthGSSAPI", conf_get_int(conf, CONF_try_gssapi_auth));
+  #ifndef NO_GSSAPI
+      wprefs(sesskey, "GSSLibs", gsslibkeywords, ngsslibs, conf, CONF_ssh_gsslist);
+!     write_setting_filename(sesskey, "GSSCustom", conf_get_filename(conf, CONF_ssh_gss_custom));
+  #endif
+!     write_setting_i(sesskey, "SshNoShell", conf_get_int(conf, CONF_ssh_no_shell));
+!     write_setting_i(sesskey, "SshProt", conf_get_int(conf, CONF_sshprot));
+!     write_setting_s(sesskey, "LogHost", conf_get_str(conf, CONF_loghost));
+!     write_setting_i(sesskey, "SSH2DES", conf_get_int(conf, CONF_ssh2_des_cbc));
+!     write_setting_filename(sesskey, "PublicKeyFile", conf_get_filename(conf, CONF_keyfile));
+!     write_setting_s(sesskey, "RemoteCommand", conf_get_str(conf, CONF_remote_cmd));
+!     write_setting_i(sesskey, "RFCEnviron", conf_get_int(conf, CONF_rfc_environ));
+!     write_setting_i(sesskey, "PassiveTelnet", conf_get_int(conf, CONF_passive_telnet));
+      write_setting_i(sesskey, "BackspaceIsDelete", conf_get_int(conf, CONF_bksp_is_delete));
+!     write_setting_i(sesskey, "RXVTHomeEnd", conf_get_int(conf, CONF_rxvt_homeend));
+      write_setting_i(sesskey, "LinuxFunctionKeys", conf_get_int(conf, CONF_funky_type));
+!     write_setting_i(sesskey, "NoApplicationKeys", conf_get_int(conf, CONF_no_applic_k));
+!     write_setting_i(sesskey, "NoApplicationCursors", conf_get_int(conf, CONF_no_applic_c));
+!     write_setting_i(sesskey, "NoMouseReporting", conf_get_int(conf, CONF_no_mouse_rep));
+!     write_setting_i(sesskey, "NoRemoteResize", conf_get_int(conf, CONF_no_remote_resize));
+!     write_setting_i(sesskey, "NoAltScreen", conf_get_int(conf, CONF_no_alt_screen));
+!     write_setting_i(sesskey, "NoRemoteWinTitle", conf_get_int(conf, CONF_no_remote_wintitle));
+      write_setting_i(sesskey, "RemoteQTitleAction", conf_get_int(conf, CONF_remote_qtitle_action));
+!     write_setting_i(sesskey, "NoDBackspace", conf_get_int(conf, CONF_no_dbackspace));
+!     write_setting_i(sesskey, "NoRemoteCharset", conf_get_int(conf, CONF_no_remote_charset));
+!     write_setting_i(sesskey, "ApplicationCursorKeys", conf_get_int(conf, CONF_app_cursor));
+!     write_setting_i(sesskey, "ApplicationKeypad", conf_get_int(conf, CONF_app_keypad));
+!     write_setting_i(sesskey, "NetHackKeypad", conf_get_int(conf, CONF_nethack_keypad));
+!     write_setting_i(sesskey, "AltF4", conf_get_int(conf, CONF_alt_f4));
+!     write_setting_i(sesskey, "AltSpace", conf_get_int(conf, CONF_alt_space));
+!     write_setting_i(sesskey, "AltOnly", conf_get_int(conf, CONF_alt_only));
+!     write_setting_i(sesskey, "ComposeKey", conf_get_int(conf, CONF_compose_key));
+!     write_setting_i(sesskey, "CtrlAltKeys", conf_get_int(conf, CONF_ctrlaltkeys));
+!     write_setting_i(sesskey, "TelnetKey", conf_get_int(conf, CONF_telnet_keyboard));
+!     write_setting_i(sesskey, "TelnetRet", conf_get_int(conf, CONF_telnet_newline));
+      write_setting_i(sesskey, "LocalEcho", conf_get_int(conf, CONF_localecho));
+      write_setting_i(sesskey, "LocalEdit", conf_get_int(conf, CONF_localedit));
+!     write_setting_s(sesskey, "Answerback", conf_get_str(conf, CONF_answerback));
+!     write_setting_i(sesskey, "AlwaysOnTop", conf_get_int(conf, CONF_alwaysontop));
+!     write_setting_i(sesskey, "FullScreenOnAltEnter", conf_get_int(conf, CONF_fullscreenonaltenter));
+!     write_setting_i(sesskey, "HideMousePtr", conf_get_int(conf, CONF_hide_mouseptr));
+!     write_setting_i(sesskey, "SunkenEdge", conf_get_int(conf, CONF_sunken_edge));
+!     write_setting_i(sesskey, "WindowBorder", conf_get_int(conf, CONF_window_border));
+!     write_setting_i(sesskey, "CurType", conf_get_int(conf, CONF_cursor_type));
+!     write_setting_i(sesskey, "BlinkCur", conf_get_int(conf, CONF_blink_cur));
+!     write_setting_i(sesskey, "Beep", conf_get_int(conf, CONF_beep));
+!     write_setting_i(sesskey, "BeepInd", conf_get_int(conf, CONF_beep_ind));
+!     write_setting_filename(sesskey, "BellWaveFile", conf_get_filename(conf, CONF_bell_wavefile));
+!     write_setting_i(sesskey, "BellOverload", conf_get_int(conf, CONF_bellovl));
+!     write_setting_i(sesskey, "BellOverloadN", conf_get_int(conf, CONF_bellovl_n));
+!     write_setting_i(sesskey, "BellOverloadT", conf_get_int(conf, CONF_bellovl_t)
+  #ifdef PUTTY_UNIX_H
+! 		    * 1000
+  #endif
+! 		    );
+!     write_setting_i(sesskey, "BellOverloadS", conf_get_int(conf, CONF_bellovl_s)
+! #ifdef PUTTY_UNIX_H
+! 		    * 1000
+! #endif
+! 		    );
+      write_setting_i(sesskey, "ScrollbackLines", conf_get_int(conf, CONF_savelines));
+!     write_setting_i(sesskey, "DECOriginMode", conf_get_int(conf, CONF_dec_om));
+!     write_setting_i(sesskey, "AutoWrapMode", conf_get_int(conf, CONF_wrap_mode));
+!     write_setting_i(sesskey, "LFImpliesCR", conf_get_int(conf, CONF_lfhascr));
+!     write_setting_i(sesskey, "CRImpliesLF", conf_get_int(conf, CONF_crhaslf));
+!     write_setting_i(sesskey, "DisableArabicShaping", conf_get_int(conf, CONF_arabicshaping));
+!     write_setting_i(sesskey, "DisableBidi", conf_get_int(conf, CONF_bidi));
+!     write_setting_i(sesskey, "WinNameAlways", conf_get_int(conf, CONF_win_name_always));
+!     write_setting_s(sesskey, "WinTitle", conf_get_str(conf, CONF_wintitle));
+      write_setting_i(sesskey, "TermWidth", conf_get_int(conf, CONF_width));
+      write_setting_i(sesskey, "TermHeight", conf_get_int(conf, CONF_height));
+--- 526,620 ----
+      write_setting_s(sesskey, "ProxyExcludeList", conf_get_str(conf, CONF_proxy_exclude_list));
+      write_setting_i(sesskey, "ProxyDNS", (conf_get_int(conf, CONF_proxy_dns)+2)%3);
+!     write_setting_i_del(sesskey, "ProxyLocalhost", conf, CONF_even_proxy_localhost, 0);
+      write_setting_i(sesskey, "ProxyMethod", conf_get_int(conf, CONF_proxy_type));
+!     write_setting_s_del(sesskey, "ProxyHost", conf, CONF_proxy_host, "proxy");
+!     write_setting_i_del(sesskey, "ProxyPort", conf, CONF_proxy_port, 80);
+!     write_setting_s_del(sesskey, "ProxyUsername", conf, CONF_proxy_username, "");
+!     write_setting_s_del(sesskey, "ProxyPassword", conf, CONF_proxy_password, "");
+!     write_setting_s_del(sesskey, "ProxyTelnetCommand", conf, CONF_proxy_telnet_command, "connect %host %port\\n");
+      wmap(sesskey, "Environment", conf, CONF_environmt);
+      write_setting_s(sesskey, "UserName", conf_get_str(conf, CONF_username));
+!     write_setting_i_del(sesskey, "UserNameFromEnvironment", conf, CONF_username_from_env, 0);
+!     write_setting_s_del(sesskey, "LocalUserName", conf, CONF_localusername, "");
+!     write_setting_i_del(sesskey, "NoPTY", conf, CONF_nopty, 0);
+!     write_setting_i_del(sesskey, "Compression", conf, CONF_compression, 0);
+!     write_setting_i_del(sesskey, "TryAgent", conf, CONF_tryagent, 1);
+!     write_setting_i_del(sesskey, "AgentFwd", conf, CONF_agentfwd, 0);
+!     write_setting_i_del(sesskey, "GssapiFwd", conf, CONF_gssapifwd, 0);
+!     write_setting_i_del(sesskey, "ChangeUsername", conf, CONF_change_username, 0);
+      wprefs(sesskey, "Cipher", ciphernames, CIPHER_MAX, conf, CONF_ssh_cipherlist);
+      wprefs(sesskey, "KEX", kexnames, KEX_MAX, conf, CONF_ssh_kexlist);
+!     write_setting_i_del(sesskey, "RekeyTime", conf, CONF_ssh_rekey_time, 60);
+!     write_setting_s_del(sesskey, "RekeyBytes", conf, CONF_ssh_rekey_data, "1G");
+!     write_setting_i_del(sesskey, "SshNoAuth", conf, CONF_ssh_no_userauth, 0);
+!     write_setting_i_del(sesskey, "SshBanner", conf, CONF_ssh_show_banner, 1);
+!     write_setting_i_del(sesskey, "AuthTIS", conf, CONF_try_tis_auth, 0);
+!     write_setting_i_del(sesskey, "AuthKI", conf, CONF_try_ki_auth, 1);
+!     write_setting_i_del(sesskey, "AuthGSSAPI", conf, CONF_try_gssapi_auth, 1);
+  #ifndef NO_GSSAPI
+      wprefs(sesskey, "GSSLibs", gsslibkeywords, ngsslibs, conf, CONF_ssh_gsslist);
+!     write_setting_filename_del(sesskey, "GSSCustom", conf, CONF_ssh_gss_custom);
+  #endif
+!     write_setting_i_del(sesskey, "SshNoShell", conf, CONF_ssh_no_shell, 0);
+!     write_setting_i_del(sesskey, "SshProt", conf, CONF_sshprot, 2);
+!     write_setting_s_del(sesskey, "LogHost", conf, CONF_loghost, "");
+!     write_setting_i_del(sesskey, "SSH2DES", conf, CONF_ssh2_des_cbc, 0);
+!     write_setting_filename_del(sesskey, "PublicKeyFile", conf, CONF_keyfile);
+!     write_setting_s_del(sesskey, "RemoteCommand", conf, CONF_remote_cmd, "");
+!     write_setting_i_del(sesskey, "RFCEnviron", conf, CONF_rfc_environ, 0);
+!     write_setting_i_del(sesskey, "PassiveTelnet", conf, CONF_passive_telnet, 0);
+      write_setting_i(sesskey, "BackspaceIsDelete", conf_get_int(conf, CONF_bksp_is_delete));
+!     write_setting_i_del(sesskey, "RXVTHomeEnd", conf, CONF_rxvt_homeend, 0);
+      write_setting_i(sesskey, "LinuxFunctionKeys", conf_get_int(conf, CONF_funky_type));
+!     write_setting_i_del(sesskey, "NoApplicationKeys", conf, CONF_no_applic_k, 0);
+!     write_setting_i_del(sesskey, "NoApplicationCursors", conf, CONF_no_applic_c, 0);
+!     write_setting_i_del(sesskey, "NoMouseReporting", conf, CONF_no_mouse_rep,0);
+!     write_setting_i_del(sesskey, "NoRemoteResize", conf, CONF_no_remote_resize, 0);
+!     write_setting_i_del(sesskey, "NoAltScreen", conf, CONF_no_alt_screen, 0);
+!     write_setting_i_del(sesskey, "NoRemoteWinTitle", conf, CONF_no_remote_wintitle, 0);
+      write_setting_i(sesskey, "RemoteQTitleAction", conf_get_int(conf, CONF_remote_qtitle_action));
+!     write_setting_i_del(sesskey, "NoDBackspace", conf, CONF_no_dbackspace, 0);
+!     write_setting_i_del(sesskey, "NoRemoteCharset", conf, CONF_no_remote_charset, 0);
+!     write_setting_i_del(sesskey, "ApplicationCursorKeys", conf, CONF_app_cursor, 0);
+!     write_setting_i_del(sesskey, "ApplicationKeypad", conf, CONF_app_keypad, 0);
+!     write_setting_i_del(sesskey, "NetHackKeypad", conf, CONF_nethack_keypad, 0);
+!     write_setting_i_del(sesskey, "AltF4", conf, CONF_alt_f4, 1);
+!     write_setting_i_del(sesskey, "AltSpace", conf, CONF_alt_space, 0);
+!     write_setting_i_del(sesskey, "AltOnly", conf, CONF_alt_only, 0);
+!     write_setting_i_del(sesskey, "ComposeKey", conf, CONF_compose_key, 0);
+!     write_setting_i_del(sesskey, "CtrlAltKeys", conf, CONF_ctrlaltkeys, 1);
+!     write_setting_i_del(sesskey, "TelnetKey", conf, CONF_telnet_keyboard, 0);
+!     write_setting_i_del(sesskey, "TelnetRet", conf, CONF_telnet_newline, 1);
+      write_setting_i(sesskey, "LocalEcho", conf_get_int(conf, CONF_localecho));
+      write_setting_i(sesskey, "LocalEdit", conf_get_int(conf, CONF_localedit));
+!     write_setting_s_del(sesskey, "Answerback", conf, CONF_answerback, "PuTTY");
+!     write_setting_i_del(sesskey, "AlwaysOnTop", conf, CONF_alwaysontop, 0);
+!     write_setting_i_del(sesskey, "FullScreenOnAltEnter", conf, CONF_fullscreenonaltenter, 0);
+!     write_setting_i_del(sesskey, "HideMousePtr", conf, CONF_hide_mouseptr, 0);
+!     write_setting_i_del(sesskey, "SunkenEdge", conf, CONF_sunken_edge, 0);
+!     write_setting_i_del(sesskey, "WindowBorder", conf, CONF_window_border, 1);
+!     write_setting_i_del(sesskey, "CurType", conf, CONF_cursor_type, 0);
+!     write_setting_i_del(sesskey, "BlinkCur", conf, CONF_blink_cur, 0);
+!     write_setting_i_del(sesskey, "Beep", conf, CONF_beep, 1);
+!     write_setting_i_del(sesskey, "BeepInd", conf, CONF_beep_ind, 0);
+!     write_setting_filename_del(sesskey, "BellWaveFile", conf, CONF_bell_wavefile);
+!     write_setting_i_del(sesskey, "BellOverload", conf, CONF_bellovl, 1);
+!     write_setting_i_del(sesskey, "BellOverloadN", conf, CONF_bellovl_n, 5);
+  #ifdef PUTTY_UNIX_H
+! #define BELL_MUL (1000)
+! #else
+! #define BELL_MUL (1)
+  #endif
+!     write_setting_i_del_raw(sesskey, "BellOverloadT", conf_get_int(conf, CONF_bellovl_t)*BELL_MUL, 2*TICKSPERSEC*BELL_MUL);
+!     write_setting_i_del_raw(sesskey, "BellOverloadS", conf_get_int(conf, CONF_bellovl_s)*BELL_MUL, 5*TICKSPERSEC*BELL_MUL);
+      write_setting_i(sesskey, "ScrollbackLines", conf_get_int(conf, CONF_savelines));
+!     write_setting_i_del(sesskey, "DECOriginMode", conf, CONF_dec_om, 0);
+!     write_setting_i_del(sesskey, "AutoWrapMode", conf, CONF_wrap_mode, 1);
+!     write_setting_i_del(sesskey, "LFImpliesCR", conf, CONF_lfhascr, 0);
+!     write_setting_i_del(sesskey, "CRImpliesLF", conf, CONF_crhaslf, 0);
+!     write_setting_i_del(sesskey, "DisableArabicShaping", conf, CONF_arabicshaping, 0);
+!     write_setting_i_del(sesskey, "DisableBidi", conf, CONF_bidi, 0);
+!     write_setting_i_del(sesskey, "WinNameAlways", conf, CONF_win_name_always, 1);
+!     write_setting_s_del(sesskey, "WinTitle", conf, CONF_wintitle, "");
+      write_setting_i(sesskey, "TermWidth", conf_get_int(conf, CONF_width));
+      write_setting_i(sesskey, "TermHeight", conf_get_int(conf, CONF_height));
+***************
+*** 559,566 ****
+      write_setting_i(sesskey, "FontQuality", conf_get_int(conf, CONF_font_quality));
+      write_setting_i(sesskey, "FontVTMode", conf_get_int(conf, CONF_vtmode));
+!     write_setting_i(sesskey, "UseSystemColours", conf_get_int(conf, CONF_system_colour));
+!     write_setting_i(sesskey, "TryPalette", conf_get_int(conf, CONF_try_palette));
+!     write_setting_i(sesskey, "ANSIColour", conf_get_int(conf, CONF_ansi_colour));
+!     write_setting_i(sesskey, "Xterm256Colour", conf_get_int(conf, CONF_xterm_256_colour));
+      write_setting_i(sesskey, "BoldAsColour", conf_get_int(conf, CONF_bold_style)-1);
+  
+--- 622,629 ----
+      write_setting_i(sesskey, "FontQuality", conf_get_int(conf, CONF_font_quality));
+      write_setting_i(sesskey, "FontVTMode", conf_get_int(conf, CONF_vtmode));
+!     write_setting_i_del(sesskey, "UseSystemColours", conf, CONF_system_colour, 0);
+!     write_setting_i_del(sesskey, "TryPalette", conf, CONF_try_palette, 0);
+!     write_setting_i_del(sesskey, "ANSIColour", conf, CONF_ansi_colour, 1);
+!     write_setting_i_del(sesskey, "Xterm256Colour", conf, CONF_xterm_256_colour, 1);
+      write_setting_i(sesskey, "BoldAsColour", conf_get_int(conf, CONF_bold_style)-1);
+  
+***************
+*** 572,582 ****
+  		conf_get_int_int(conf, CONF_colours, i*3+1),
+  		conf_get_int_int(conf, CONF_colours, i*3+2));
+! 	write_setting_s(sesskey, buf, buf2);
+      }
+!     write_setting_i(sesskey, "RawCNP", conf_get_int(conf, CONF_rawcnp));
+!     write_setting_i(sesskey, "PasteRTF", conf_get_int(conf, CONF_rtf_paste));
+!     write_setting_i(sesskey, "MouseIsXterm", conf_get_int(conf, CONF_mouse_is_xterm));
+!     write_setting_i(sesskey, "RectSelect", conf_get_int(conf, CONF_rect_select));
+!     write_setting_i(sesskey, "MouseOverride", conf_get_int(conf, CONF_mouse_override));
+      for (i = 0; i < 256; i += 32) {
+  	char buf[20], buf2[256];
+--- 635,645 ----
+  		conf_get_int_int(conf, CONF_colours, i*3+1),
+  		conf_get_int_int(conf, CONF_colours, i*3+2));
+! 	write_setting_s_del(sesskey, buf, (Conf *)buf2, -1 ,Colourxx_defaults[i]);
+      }
+!     write_setting_i_del(sesskey, "RawCNP", conf, CONF_rawcnp, 0);
+!     write_setting_i_del(sesskey, "PasteRTF", conf, CONF_rtf_paste, 0);
+!     write_setting_i_del(sesskey, "MouseIsXterm", conf, CONF_mouse_is_xterm, 0);
+!     write_setting_i_del(sesskey, "RectSelect", conf, CONF_rect_select, 0);
+!     write_setting_i_del(sesskey, "MouseOverride", conf, CONF_mouse_override, 1);
+      for (i = 0; i < 256; i += 32) {
+  	char buf[20], buf2[256];
+***************
+*** 589,613 ****
+  		    conf_get_int_int(conf, CONF_wordness, j));
+  	}
+! 	write_setting_s(sesskey, buf, buf2);
+      }
+      write_setting_s(sesskey, "LineCodePage", conf_get_str(conf, CONF_line_codepage));
+!     write_setting_i(sesskey, "CJKAmbigWide", conf_get_int(conf, CONF_cjk_ambig_wide));
+!     write_setting_i(sesskey, "UTF8Override", conf_get_int(conf, CONF_utf8_override));
+      write_setting_s(sesskey, "Printer", conf_get_str(conf, CONF_printer));
+!     write_setting_i(sesskey, "CapsLockCyr", conf_get_int(conf, CONF_xlat_capslockcyr));
+!     write_setting_i(sesskey, "ScrollBar", conf_get_int(conf, CONF_scrollbar));
+!     write_setting_i(sesskey, "ScrollBarFullScreen", conf_get_int(conf, CONF_scrollbar_in_fullscreen));
+!     write_setting_i(sesskey, "ScrollOnKey", conf_get_int(conf, CONF_scroll_on_key));
+!     write_setting_i(sesskey, "ScrollOnDisp", conf_get_int(conf, CONF_scroll_on_disp));
+!     write_setting_i(sesskey, "EraseToScrollback", conf_get_int(conf, CONF_erase_to_scrollback));
+!     write_setting_i(sesskey, "LockSize", conf_get_int(conf, CONF_resize_action));
+!     write_setting_i(sesskey, "BCE", conf_get_int(conf, CONF_bce));
+!     write_setting_i(sesskey, "BlinkText", conf_get_int(conf, CONF_blinktext));
+!     write_setting_i(sesskey, "X11Forward", conf_get_int(conf, CONF_x11_forward));
+!     write_setting_s(sesskey, "X11Display", conf_get_str(conf, CONF_x11_display));
+      write_setting_i(sesskey, "X11AuthType", conf_get_int(conf, CONF_x11_auth));
+!     write_setting_filename(sesskey, "X11AuthFile", conf_get_filename(conf, CONF_xauthfile));
+!     write_setting_i(sesskey, "LocalPortAcceptAll", conf_get_int(conf, CONF_lport_acceptall));
+!     write_setting_i(sesskey, "RemotePortAcceptAll", conf_get_int(conf, CONF_rport_acceptall));
+      wmap(sesskey, "PortForwardings", conf, CONF_portfwd);
+      write_setting_i(sesskey, "BugIgnore1", 2-conf_get_int(conf, CONF_sshbug_ignore1));
+--- 652,676 ----
+  		    conf_get_int_int(conf, CONF_wordness, j));
+  	}
+! 	write_setting_s_del(sesskey, buf, (Conf *)buf2, -1, Wordnessxx_defaults[i/32]);
+      }
+      write_setting_s(sesskey, "LineCodePage", conf_get_str(conf, CONF_line_codepage));
+!     write_setting_i_del(sesskey, "CJKAmbigWide", conf, CONF_cjk_ambig_wide, 0);
+!     write_setting_i_del(sesskey, "UTF8Override", conf, CONF_utf8_override, 1);
+      write_setting_s(sesskey, "Printer", conf_get_str(conf, CONF_printer));
+!     write_setting_i_del(sesskey, "CapsLockCyr", conf, CONF_xlat_capslockcyr, 0);
+!     write_setting_i_del(sesskey, "ScrollBar", conf, CONF_scrollbar, 1);
+!     write_setting_i_del(sesskey, "ScrollBarFullScreen", conf, CONF_scrollbar_in_fullscreen, 0);
+!     write_setting_i_del(sesskey, "ScrollOnKey", conf, CONF_scroll_on_key, 0);
+!     write_setting_i_del(sesskey, "ScrollOnDisp", conf, CONF_scroll_on_disp, 1);
+!     write_setting_i_del(sesskey, "EraseToScrollback", conf, CONF_erase_to_scrollback, 1);
+!     write_setting_i_del(sesskey, "LockSize", conf, CONF_resize_action, 0);
+!     write_setting_i_del(sesskey, "BCE", conf, CONF_bce, 1);
+!     write_setting_i_del(sesskey, "BlinkText", conf, CONF_blinktext, 0);
+!     write_setting_i_del(sesskey, "X11Forward", conf, CONF_x11_forward, 0);
+!     write_setting_s_del(sesskey, "X11Display", conf, CONF_x11_display, "");
+      write_setting_i(sesskey, "X11AuthType", conf_get_int(conf, CONF_x11_auth));
+!     write_setting_filename_del(sesskey, "X11AuthFile", conf, CONF_xauthfile);
+!     write_setting_i_del(sesskey, "LocalPortAcceptAll", conf, CONF_lport_acceptall, 0);
+!     write_setting_i_del(sesskey, "RemotePortAcceptAll", conf, CONF_rport_acceptall, 0);
+      wmap(sesskey, "PortForwardings", conf, CONF_portfwd);
+      write_setting_i(sesskey, "BugIgnore1", 2-conf_get_int(conf, CONF_sshbug_ignore1));
+***************
+*** 622,640 ****
+      write_setting_i(sesskey, "BugMaxPkt2", 2-conf_get_int(conf, CONF_sshbug_maxpkt2));
+      write_setting_i(sesskey, "BugWinadj", 2-conf_get_int(conf, CONF_sshbug_winadj));
+!     write_setting_i(sesskey, "StampUtmp", conf_get_int(conf, CONF_stamp_utmp));
+!     write_setting_i(sesskey, "LoginShell", conf_get_int(conf, CONF_login_shell));
+!     write_setting_i(sesskey, "ScrollbarOnLeft", conf_get_int(conf, CONF_scrollbar_on_left));
+      write_setting_fontspec(sesskey, "BoldFont", conf_get_fontspec(conf, CONF_boldfont));
+      write_setting_fontspec(sesskey, "WideFont", conf_get_fontspec(conf, CONF_widefont));
+      write_setting_fontspec(sesskey, "WideBoldFont", conf_get_fontspec(conf, CONF_wideboldfont));
+!     write_setting_i(sesskey, "ShadowBold", conf_get_int(conf, CONF_shadowbold));
+!     write_setting_i(sesskey, "ShadowBoldOffset", conf_get_int(conf, CONF_shadowboldoffset));
+      write_setting_s(sesskey, "SerialLine", conf_get_str(conf, CONF_serline));
+!     write_setting_i(sesskey, "SerialSpeed", conf_get_int(conf, CONF_serspeed));
+!     write_setting_i(sesskey, "SerialDataBits", conf_get_int(conf, CONF_serdatabits));
+!     write_setting_i(sesskey, "SerialStopHalfbits", conf_get_int(conf, CONF_serstopbits));
+      write_setting_i(sesskey, "SerialParity", conf_get_int(conf, CONF_serparity));
+      write_setting_i(sesskey, "SerialFlowControl", conf_get_int(conf, CONF_serflow));
+!     write_setting_s(sesskey, "WindowClass", conf_get_str(conf, CONF_winclass));
+  }
+  
+--- 685,709 ----
+      write_setting_i(sesskey, "BugMaxPkt2", 2-conf_get_int(conf, CONF_sshbug_maxpkt2));
+      write_setting_i(sesskey, "BugWinadj", 2-conf_get_int(conf, CONF_sshbug_winadj));
+!     write_setting_i_del(sesskey, "StampUtmp", conf, CONF_stamp_utmp, 1);
+!     write_setting_i_del(sesskey, "LoginShell", conf, CONF_login_shell, 1);
+!     write_setting_i_del(sesskey, "ScrollbarOnLeft", conf, CONF_scrollbar_on_left, 0);
+      write_setting_fontspec(sesskey, "BoldFont", conf_get_fontspec(conf, CONF_boldfont));
+      write_setting_fontspec(sesskey, "WideFont", conf_get_fontspec(conf, CONF_widefont));
+      write_setting_fontspec(sesskey, "WideBoldFont", conf_get_fontspec(conf, CONF_wideboldfont));
+!     write_setting_i_del(sesskey, "ShadowBold", conf, CONF_shadowbold, 0);
+!     write_setting_i_del(sesskey, "ShadowBoldOffset", conf, CONF_shadowboldoffset, 1);
+      write_setting_s(sesskey, "SerialLine", conf_get_str(conf, CONF_serline));
+!     write_setting_i_del(sesskey, "SerialSpeed", conf, CONF_serspeed, 9600);
+!     write_setting_i_del(sesskey, "SerialDataBits", conf, CONF_serdatabits, 8);
+!     write_setting_i_del(sesskey, "SerialStopHalfbits", conf, CONF_serstopbits, 2);
+      write_setting_i(sesskey, "SerialParity", conf_get_int(conf, CONF_serparity));
+      write_setting_i(sesskey, "SerialFlowControl", conf_get_int(conf, CONF_serflow));
+!     write_setting_s_del(sesskey, "WindowClass", conf, CONF_winclass, "");
+! #if 0
+! /* These might be from MobaXTerm or another PuTTY fork */
+!     write_setting_s(sesskey, "ConnectionSharing", NULL);
+!     write_setting_s(sesskey, "ConnectionSharingDownstream", NULL);
+!     write_setting_s(sesskey, "ConnectionSharingUpstream", NULL);
+! #endif
+  }
+  
+***************
+*** 784,788 ****
+      gppi(sesskey, "BackspaceIsDelete", 1, conf, CONF_bksp_is_delete);
+      gppi(sesskey, "RXVTHomeEnd", 0, conf, CONF_rxvt_homeend);
+!     gppi(sesskey, "LinuxFunctionKeys", 0, conf, CONF_funky_type);
+      gppi(sesskey, "NoApplicationKeys", 0, conf, CONF_no_applic_k);
+      gppi(sesskey, "NoApplicationCursors", 0, conf, CONF_no_applic_c);
+--- 853,857 ----
+      gppi(sesskey, "BackspaceIsDelete", 1, conf, CONF_bksp_is_delete);
+      gppi(sesskey, "RXVTHomeEnd", 0, conf, CONF_rxvt_homeend);
+!     gppi(sesskey, "LinuxFunctionKeys", 6, conf, CONF_funky_type); /* Good bye cruel Tilde */
+      gppi(sesskey, "NoApplicationKeys", 0, conf, CONF_no_applic_k);
+      gppi(sesskey, "NoApplicationCursors", 0, conf, CONF_no_applic_c);
+***************
+*** 829,852 ****
+      gppi(sesskey, "BellOverload", 1, conf, CONF_bellovl);
+      gppi(sesskey, "BellOverloadN", 5, conf, CONF_bellovl_n);
+!     i = gppi_raw(sesskey, "BellOverloadT", 2*TICKSPERSEC
+! #ifdef PUTTY_UNIX_H
+! 				   *1000
+! #endif
+! 				   );
+!     conf_set_int(conf, CONF_bellovl_t, i
+! #ifdef PUTTY_UNIX_H
+! 		 / 1000
+! #endif
+! 		 );
+!     i = gppi_raw(sesskey, "BellOverloadS", 5*TICKSPERSEC
+! #ifdef PUTTY_UNIX_H
+! 				   *1000
+! #endif
+! 				   );
+!     conf_set_int(conf, CONF_bellovl_s, i
+! #ifdef PUTTY_UNIX_H
+! 		 / 1000
+! #endif
+! 		 );
+      gppi(sesskey, "ScrollbackLines", 2000, conf, CONF_savelines);
+      gppi(sesskey, "DECOriginMode", 0, conf, CONF_dec_om);
+--- 898,905 ----
+      gppi(sesskey, "BellOverload", 1, conf, CONF_bellovl);
+      gppi(sesskey, "BellOverloadN", 5, conf, CONF_bellovl_n);
+!     i = gppi_raw(sesskey, "BellOverloadT", 2*TICKSPERSEC*BELL_MUL);
+!     conf_set_int(conf, CONF_bellovl_t, i/BELL_MUL);
+!     i = gppi_raw(sesskey, "BellOverloadS", 5*TICKSPERSEC*BELL_MUL);
+!     conf_set_int(conf, CONF_bellovl_s, i/BELL_MUL);
+      gppi(sesskey, "ScrollbackLines", 2000, conf, CONF_savelines);
+      gppi(sesskey, "DECOriginMode", 0, conf, CONF_dec_om);
+***************
+*** 870,884 ****
+  
+      for (i = 0; i < 22; i++) {
+- 	static const char *const defaults[] = {
+- 	    "187,187,187", "255,255,255", "0,0,0", "85,85,85", "0,0,0",
+- 	    "0,255,0", "0,0,0", "85,85,85", "187,0,0", "255,85,85",
+- 	    "0,187,0", "85,255,85", "187,187,0", "255,255,85", "0,0,187",
+- 	    "85,85,255", "187,0,187", "255,85,255", "0,187,187",
+- 	    "85,255,255", "187,187,187", "255,255,255"
+- 	};
+  	char buf[20], *buf2;
+  	int c0, c1, c2;
+  	sprintf(buf, "Colour%d", i);
+! 	buf2 = gpps_raw(sesskey, buf, defaults[i]);
+  	if (sscanf(buf2, "%d,%d,%d", &c0, &c1, &c2) == 3) {
+  	    conf_set_int_int(conf, CONF_colours, i*3+0, c0);
+--- 923,930 ----
+  
+      for (i = 0; i < 22; i++) {
+  	char buf[20], *buf2;
+  	int c0, c1, c2;
+  	sprintf(buf, "Colour%d", i);
+! 	buf2 = gpps_raw(sesskey, buf, Colourxx_defaults[i]);
+  	if (sscanf(buf2, "%d,%d,%d", &c0, &c1, &c2) == 3) {
+  	    conf_set_int_int(conf, CONF_colours, i*3+0, c0);
+***************
+*** 894,911 ****
+      gppi(sesskey, "MouseOverride", 1, conf, CONF_mouse_override);
+      for (i = 0; i < 256; i += 32) {
+- 	static const char *const defaults[] = {
+- 	    "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+- 	    "0,1,2,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1",
+- 	    "1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,2",
+- 	    "1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1",
+- 	    "1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1",
+- 	    "1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1",
+- 	    "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,2,2,2,2,2,2,2,2",
+- 	    "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,2,2,2,2,2,2,2,2"
+- 	};
+  	char buf[20], *buf2, *p;
+  	int j;
+  	sprintf(buf, "Wordness%d", i);
+! 	buf2 = gpps_raw(sesskey, buf, defaults[i / 32]);
+  	p = buf2;
+  	for (j = i; j < i + 32; j++) {
+--- 940,947 ----
+      gppi(sesskey, "MouseOverride", 1, conf, CONF_mouse_override);
+      for (i = 0; i < 256; i += 32) {
+  	char buf[20], *buf2, *p;
+  	int j;
+  	sprintf(buf, "Wordness%d", i);
+! 	buf2 = gpps_raw(sesskey, buf, Wordnessxx_defaults[i / 32]);
+  	p = buf2;
+  	for (j = i; j < i + 32; j++) {
+diff -r -C2 terminal.c.orig terminal.c
+*** terminal.c.orig	Sun Mar 10 07:04:07 2013
+--- terminal.c	Tue Mar 31 23:19:58 2015
+***************
+*** 2522,2525 ****
+--- 2522,2531 ----
+  	    term->disptop = 0;
+  	    break;
++ 	  case 1063:                   /* Foxpro for Unix Keyboard Mode */
++ 	    term->funky_Foxpro=state;
++ 	    break;
++ 	  case 1064:
++ 	    term->invert_Caps_Lock=state;
++ 	    break;
+  	  case 2004:		       /* xterm bracketed paste */
+  	    term->bracketed_paste = state ? TRUE : FALSE;
+***************
+*** 2573,2576 ****
+--- 2579,2691 ----
+  }
+  
++ #ifdef PRINT_TO_CLIPBOARD_STRING
++ /*
++  * Windows clipboard support
++  * Diomidis Spinellis, June 2003
++  * Modified 2014-04-04 cjs for PuTTY 0.63.
++  * My technique is simpler and safer than the original. 
++  * The Windows Clipboard printer loads and saves properly.
++  */
++ static char *g_sClip=NULL;
++ static size_t g_cbClipLen,g_cbClipSize; 
++ /* len=length of data not including extra \0. We don't include the \0 because isn't part of the data and it isn't even needed.
++  * size=total size of buffer */
++ 
++ #define CLIP_CHUNK (16384)
++ 
++ static void clipboard_init(void){
++   if (g_sClip) sfree(g_sClip);
++   g_sClip = smalloc(g_cbClipSize = CLIP_CHUNK);
++   g_cbClipLen = 0;
++ }
++ 
++ static void clipboard_data(void *buff,  int len) {
++   if (g_sClip) {
++     if (g_cbClipLen+len+1>g_cbClipSize) { /* +1 reserves us the extra 1 character */
++       while(g_cbClipSize<g_cbClipLen+len+1) g_cbClipSize *= 2;
++       g_sClip = srealloc(g_sClip, g_cbClipSize);
++     }
++     memcpy(g_sClip+g_cbClipLen, buff, len);
++     g_cbClipLen += len;
++     g_sClip[g_cbClipLen]='\0'; /* This \0 is always there to keep an extra character but not counted in the length */
++   }
++ }
++ 
++ /* data from Unix is likely to contain lots of wierd line endings. We'll fix them all. */
++ /* This fixes all line endings to CRLF for Windows. */
++ static void clipboard_cleanCRLF(char **pbuff1, size_t *plen,size_t *psiz) {
++   char *buff1=*pbuff1,*buff2=smalloc(*psiz = *psiz*2+16),*p1,*p1e,*p2;
++   for(p1=buff1, p1e=p1+*plen, p2=buff2; p1<p1e; ) {
++     if (*p1 == '\r' && p1[1]=='\n') { /* buff1 must have an extra character on the end for this to not be a buffer overrun. The extra character should not be a '\n' */
++       *p2++='\r'; *p2++='\n';
++       p1+=2; 
++     } else if (*p1 == '\r' || *p1=='\n') {
++       *p2++='\r'; *p2++='\n';
++       p1++; 
++     } else if (*p1 == '\0') {
++       p1++; /* Telnet servers can send NUL characters at EOL. A NULL in the windows clipboard terminates it. */
++     } else {
++       *p2++ = *p1++; 
++     }
++   }
++   *p2='\0';
++   *pbuff1=buff2;
++   *plen = p2-buff2;
++   sfree(buff1);
++ }
++ 
++ /* This shrinks or stays the same so we don't need a second buffer */
++ static void clipboard_cleanLF(char *buff1, size_t *plen,char chCR) { /* chCR can be \r or \n as desired */
++   char *p1,*p1e,*p2;
++   for(p1=buff1, p1e=p1+*plen, p2=buff1; p1<p1e; ) {
++     if (*p1 == '\r' && p1[1]=='\n') { /* buff1 must be 0 terminated for this to not be a buffer overrun */
++       *p2++=chCR;
++       p1+=2; 
++     } else if (*p1 == '\r' || *p1=='\n') {
++       *p2++=chCR;
++       p1++;
++     } else if (*p1 == '\0') {
++       p1++; /* Telnet servers can send NUL characters at EOL. A NULL in the windows clipboard terminates it. */
++     } else {
++       if (p2 != p1) *p2 = *p1;
++       p2++; p1++;
++     }
++   }
++   *p2='\0';
++   *plen = p2-buff1;
++ }
++ 
++ static void clipboard_copy(void) {
++   if (g_sClip) {
++     clipboard_cleanCRLF(&g_sClip,&g_cbClipLen,&g_cbClipSize);
++     //clipboard_cleanLF(g_sClip,&g_cbClipLen,'\n');
++ #if 1
++     write_aclip(NULL, g_sClip, g_cbClipSize, 0); /* This 0 terminates for us */
++ #else
++     if (OpenClipboard(NULL)) {
++       if (EmptyClipboard()) {
++         HANDLE hglb = GlobalAlloc(GMEM_DDESHARE, g_cbClipSize + 1);
++         if (hglb != NULL) {
++           char *cclip=GlobalLock(hglb);
++           if (cclip) {
++             memcpy(cclip, g_sClip, g_cbClipSize);
++             cclip[g_cbClipSize] = '\0';
++             GlobalUnlock(hglb);
++             SetClipboardData(CF_TEXT, hglb);
++             hglb=NULL;
++           }
++           if (hglb != NULL) GlobalFree(hglb);
++         }
++       }
++       CloseClipboard(); 
++     }
++ #endif
++     sfree(g_sClip);
++     g_sClip=NULL;
++     g_cbClipSize=0;
++   }
++ }
++ #endif
++ 
+  /*
+   * ANSI printing routines.
+***************
+*** 2579,2582 ****
+--- 2694,2700 ----
+  {
+      bufchain_clear(&term->printer_buf);
++ #ifdef PRINT_TO_CLIPBOARD_STRING
++     if (0==stricmp(printer,PRINT_TO_CLIPBOARD_STRING)) clipboard_init(); if (!g_sClip)
++ #endif
+      term->print_job = printer_start_job(printer);
+  }
+***************
+*** 2590,2593 ****
+--- 2708,2714 ----
+  	if (len > size-5)
+  	    len = size-5;
++ #ifdef PRINT_TO_CLIPBOARD_STRING
++ 	if (g_sClip) clipboard_data(data, len); else
++ #endif
+  	printer_job_data(term->print_job, data, len);
+  	bufchain_consume(&term->printer_buf, len);
+***************
+*** 2611,2618 ****
+--- 2732,2745 ----
+  	    break;
+  	} else {
++ #ifdef PRINT_TO_CLIPBOARD_STRING
++ 	    if (g_sClip) clipboard_data(&c, 1); else
++ #endif
+  	    printer_job_data(term->print_job, &c, 1);
+  	    bufchain_consume(&term->printer_buf, 1);
+  	}
+      }
++ #ifdef PRINT_TO_CLIPBOARD_STRING
++     if (g_sClip) clipboard_copy(); else
++ #endif
+      printer_finish_job(term->print_job);
+      term->print_job = NULL;
+***************
+*** 2865,2869 ****
+  		 */
+  		compatibility(ANSIMIN);
+! 		if (term->ldisc) {
+  		    lpage_send(term->ldisc, DEFAULT_CODEPAGE,
+  			       term->answerback, term->answerbacklen, 0);
+--- 2992,2996 ----
+  		 */
+  		compatibility(ANSIMIN);
+! 		if (term->ldisc && term->answerbacklen) {
+  		    lpage_send(term->ldisc, DEFAULT_CODEPAGE,
+  			       term->answerback, term->answerbacklen, 0);
+diff -r -C2 terminal.h.orig terminal.h
+*** terminal.h.orig	Wed Jan 23 17:59:17 2013
+--- terminal.h	Thu May 15 00:27:44 2014
+***************
+*** 324,327 ****
+--- 324,335 ----
+      int scroll_on_key;
+      int xterm_256_colour;
++     int funky_Foxpro;
++ #if 1
++     int invert_Caps_Lock;
++ #define TERM_INVCAPS (term->invert_Caps_Lock)
++ #define TERM_INVCAPS_ENABLE
++ #else 
++ #define TERM_INVCAPS (0)
++ #endif
+  };
+  
+diff -r -C2 timing.c.orig timing.c
+*** timing.c.orig	Wed Sep 19 18:12:00 2012
+--- timing.c	Fri Apr  4 09:56:42 2014
+***************
+*** 61,65 ****
+       * we don't get unwanted equality.
+       */
+! #if defined(__LCC__) || defined(__clang__)
+      /* lcc won't let us compare function pointers. Legal, but annoying. */
+      {
+--- 61,65 ----
+       * we don't get unwanted equality.
+       */
+! #if defined(__LCC__) || defined(__clang__) || defined(__POCC__)
+      /* lcc won't let us compare function pointers. Legal, but annoying. */
+      {
+diff -r -C2 windows/window.c.orig windows/window.c
+*** windows/window.c.orig	Sun Aug  4 15:32:10 2013
+--- windows/window.c	Thu May 15 00:28:44 2014
+***************
+*** 2,5 ****
+--- 2,6 ----
+   * window.c - the PuTTY(tel) main program, which runs a PuTTY terminal
+   * emulator and backend in a window.
++  * tab size=8, indent size=4, a setting most editors can't handle
+   */
+  
+***************
+*** 42,45 ****
+--- 43,48 ----
+  #define IDM_CLRSB     0x0060
+  #define IDM_RESET     0x0070
++ #define IDM_INVCAPS   0x0080 /* Comment this out to remove Invert Caps Lock */
++ #define IDM_COPYMODES 0x0090
+  #define IDM_HELP      0x0140
+  #define IDM_ABOUT     0x0150
+***************
+*** 141,144 ****
+--- 144,153 ----
+  static HMENU savedsess_menu;
+  
++ #ifdef IDM_INVCAPS
++ static int g_InvertCapsLock=MF_UNCHECKED; /* set it to MF_CHECKED if you want to start that way */
++ #else
++ #define g_InvertCapsLock (MF_UNCHECKED)
++ #endif
++ 
+  Conf *conf;			       /* exported to windlg.c */
+  
+***************
+*** 817,820 ****
+--- 826,836 ----
+  	    AppendMenu(m, MF_ENABLED, IDM_CLRSB, "C&lear Scrollback");
+  	    AppendMenu(m, MF_ENABLED, IDM_RESET, "Rese&t Terminal");
++ #ifdef IDM_INVCAPS
++ 	    AppendMenu(m, MF_ENABLED, IDM_INVCAPS, "&Invert Caps Lock");
++ 	    CheckMenuItem(m,IDM_INVCAPS,MF_BYCOMMAND|g_InvertCapsLock);
++ #endif
++ #ifdef IDM_COPYMODES
++ 	    AppendMenu(m, MF_ENABLED, IDM_COPYMODES, "&Copy Modes");
++ #endif
+  	    AppendMenu(m, MF_SEPARATOR, 0, 0);
+  	    AppendMenu(m, (conf_get_int(conf, CONF_resize_action)
+***************
+*** 1296,1300 ****
+      gcpr.lpClass = (void *)classbuffer;
+      gcpr.nGlyphs = cbCount;
+!     GetCharacterPlacementW(hdc, lpString, cbCount, 0, &gcpr,
+  			   FLI_MASK | GCP_CLASSIN | GCP_DIACRITIC);
+  
+--- 1312,1316 ----
+      gcpr.lpClass = (void *)classbuffer;
+      gcpr.nGlyphs = cbCount;
+!     GetCharacterPlacementW(hdc, lpString, cbCount, 0, (LPGCP_RESULTSW)&gcpr,
+  			   FLI_MASK | GCP_CLASSIN | GCP_DIACRITIC);
+  
+***************
+*** 2044,2047 ****
+--- 2060,2073 ----
+  }
+  
++ static const char *get_cset_attr(int cset_attr) {
++   switch(cset_attr) {
++   case CSET_ASCII: return "B ASCII";
++   case CSET_LINEDRW: return "O LINEDRAW";
++   case CSET_SCOACS: return "U SCOACS";
++   case CSET_GBCHR: return "A GBCHR";
++   default: return "? unknown";
++   }
++ }
++ 
+  static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,
+  				WPARAM wParam, LPARAM lParam)
+***************
+*** 2055,2058 ****
+--- 2081,2092 ----
+      int resize_action;
+  
++ #if 0 /* Did you know that Shift+Ctrl+VK_0 never sends a WM_KEYDOWN */
++   if (wParam == VK_0) { /* This code is here to verify Windows really does that and not the Putty SRC */
++     debug(("VK_0: msg=%x\n", message,wParam)); 
++   }
++   if (message==0x100 || message==0x101 || message==0x104 || message==0x105) {
++     debug(("msg=%x: VK_%02x\n", message,wParam)); 
++   }
++ #endif
+      switch (message) {
+        case WM_TIMER:
+***************
+*** 2385,2388 ****
+--- 2419,2508 ----
+  		ldisc_send(ldisc, NULL, 0, 0);
+  	    break;
++ #ifdef IDM_INVCAPS
++ 	  case IDM_INVCAPS: {
++ 	    size_t j;
++ 	    g_InvertCapsLock = (g_InvertCapsLock==MF_CHECKED)?MF_UNCHECKED:MF_CHECKED;
++ 	    for (j = 0; j < lenof(popup_menus); j++) {
++ 		CheckMenuItem(popup_menus[j].menu,IDM_INVCAPS,MF_BYCOMMAND|g_InvertCapsLock);
++ 	    }
++ 	  }break;
++ #endif
++ #ifdef IDM_COPYMODES
++ 	  case IDM_COPYMODES: {
++ 	    char st[2048];
++ 	    write_aclip(NULL,st, 
++ 	    sprintf(st,
++ 	      "Alternate Character Set %s\r\n"
++ 	      "Code Page %s\r\n"
++ 	      "G0 Charset ESC(%s\r\n"
++ 	      "G1 Charset ESC)%s\r\n"
++ 	        "G2/3 Charset (not supported)\r\n"
++ 	      "DECKPAM Application Keypad %s (%s by setting)\r\n"
++ 	      "IRM Insert Mode %s\r\n"
++ 	      "SRM Terminal %s\r\n"
++ 	      "LNM Return sends %s\r\n"
++ 	      "WYULCURM Cursor %s\r\n"
++ 	      "DECCKM Application Cursor Keys %s (%s by setting)%s\r\n"
++ 	      "Mode %s\r\n"
++ 	      "DECCOLM Column Mode %s\r\n"
++ 	      "DECSCNM Reverse Video %s\r\n"
++ 	      "DECOM Origin Mode %s\r\n"
++ 	      "DECAWM Wraparound Mode %s\r\n"
++ 	      "DECARM Auto-repeat Keys %s\r\n"
++ 	      "DECEDM Editing %s (AKA rxvt Show toolbar)\r\n"
++ 	      "DECTCEM Show Cursor %s\r\n"
++ 	      "Screen Buffer %s\r\n"
++ 	      "%s (%s by setting)\r\n" /* Mouse 1000, 1001 */
++ 	      "Extended Mouse %s\r\n"
++ 	      "rxvt Mouse %s\r\n"
++ 	      "Foxpro for Unix keyboard mode %s\r\n"
++ #ifdef TERM_INVCAPS_ENABLE
++ 	      "Invert Caps Lock mode %s\r\n"
++ #endif
++ 	      "Bracketed Paste %s\r\n"
++ 	      "Print to Term %s\r\n"
++ 	      "DECSCL Conformance %s 0x%4.4x (See Putty TERMINAL.C)\r\n"
++ 	      //" %s\r\n"
++ 	     ,term->cset?"G1 ^N":"G0 ^O"
++ 	     ,term->utf?"UTF-8 ESC%G":"LOCAL ESC%@"
++ 	     ,get_cset_attr(term->cset_attr[0])
++ 	     ,get_cset_attr(term->cset_attr[1])
++ 	     ,(term->app_keypad_keys)?"Special ESC=":"Normal ESC>",conf_get_int(conf, CONF_no_applic_k)?"Disabled":"Permitted"
++ 	     ,term->insert?"On CSI4h":"Replace CSI4l"
++ 	     ,(!term->term_echoing)?"Not Echoing CSI12h":"Echoing CSI12l"
++ 	     ,term->cr_lf_return?"CRLF CSI20h":"CR (no LF) CSI20l"
++ 	     ,(!term->big_cursor)?"Big CSI34h":"not Big CSI34l"
++ 	     ,term->app_cursor_keys?"Enabled CSI?1h":"Disabled CSI?1l",conf_get_int(conf, CONF_no_applic_c)?"Disabled":"Permitted"
++ 	       ,term->app_cursor_keys?"\r\n  (Im in ur keyboardz, killin ur m0vz)":""
++ 	     /* Just a hint of my distaste for ACK. It's only apparent function is to make arrow keys not work in half the applications
++ 	      * Turn it off in PuTTY and now the arrows don't work in the other half.
++ 	      * Disable it in termcap and now arrows don't work in 1/3 the applications. 
++ 	      * With ACK you can't win. You can only choose how you lose! hjkl FTW! -CJS */
++ 	     ,term->vt52_mode?"vt52 CSI?2l (ESC< to leave)":"vt100 CSI?2h" 
++ 	     ,term->reset_132?"132 CSI?3h":"80 CSI?3l"
++ 	     ,term->rvideo?"On CSI?5h":"Off CSI?5l"
++ 	     ,term->dec_om?"On CSI?6h":"Off CSI?6l"
++ 	     ,term->wrap?"On CSI?7h":"Off CSI?7l"
++ 	     ,term->repeat_off?"Off CSI?8h":"On CSI?8l"
++ 	     ,term->term_editing?"On CSI?10h":"Off CSI?10l"
++ 	     ,term->cursor_on?"On CSI?25h":"Off CSI?25l"
++ 	     ,term->alt_which?"Alternate CSI?47h CSI?1047h":"Primary CSI?47l CSI?1047l"
++ 	     ,(term->xterm_mouse==2)?"Mouse XY on button with drags CSI?1001h":((term->xterm_mouse==1)?"Mouse XY on button (no drags) CSI?1000h":"No mouse CSI?1000l CSI?1001l"),conf_get_int(conf, CONF_no_mouse_rep)?"Disabled":"Permitted"
++ 	     ,term->xterm_extended_mouse?"Enabled CSI?1006h":"Disabled CSI?1006l"
++ 	     ,term->urxvt_extended_mouse?"Enabled CSI?1015h":"Disabled CSI?1015l"
++ 	     ,term->funky_Foxpro?"Enabled CSI?1063h":"Disabled CSI?1063l"
++ #ifdef TERM_INVCAPS_ENABLE
++ 	     ,term->invert_Caps_Lock?"Enabled CSI?1064h":"Disabled CSI?1064l"
++ #endif
++ 	     ,term->bracketed_paste?"Enabled CSI?2004h":"Disabled CSI?2004l"
++ 	     ,term->printing?"On CSI?5i (Use ESC[4i to disable)":"Off CSI?4i"
++ #define CL_ANSIMIN	0x0001	       /* Codes in all ANSI like terminals. */
++ #define CL_SCOANSI	0x1000	       /* SCOANSI not in ANSIMIN. */
++ #define TM_SCOANSI	(CL_ANSIMIN|CL_SCOANSI)
++ #define TM_PUTTY	(0xFFFF)
++ 	     ,(term->compatibility_level==TM_PUTTY)?"PuTTY":((term->compatibility_level==TM_SCOANSI)?"SCOAnsi":"VTXXX"),term->compatibility_level
++ 	    ),0); /* I found as many as I could. There are probably more. */
++ 	  }break;
++ #endif
+  	  case IDM_ABOUT:
+  	    showabout(hwnd);
+***************
+*** 3898,3901 ****
+--- 4018,4184 ----
+  }
+  
++ static unsigned char *format_keypad(unsigned char *p, WPARAM wParam, int funky_type1, int shift_state);
++ #define SHIFTSTATE_SHIFT (1) /* NetHack uses shift_state as an array offset so we can't reorder the bits */
++ #define SHIFTSTATE_CTRL (2)
++ #define SHIFTSTATE_ALT (4)
++ #define SHIFTSTATE_META (8)
++ 
++ #if 0 /* 1 to enable, 0 to disable debug table generation */
++ /* The table is generated when the first key is hit in the emulator, so hit ^D and compare */
++ /* They are used to check that the keys are right as I rearrange the code to make 
++  * Foxpro for Unix & XTerm New possible */
++ #define KEYCHECK_KEYSTATES (16)
++ #define KEYCHECK_JUSTIFY (12)
++ struct keycheck {
++   WPARAM wParam;
++   char desc[16];
++   /*char *st[KEYCHECK_KEYSTATES];*/
++ };
++ #define KEYCHECKTABLE(vk) {vk,#vk},
++ #define KEYCHECKBLANK \
++   KEYCHECKTABLE(VK_CLEAR)\
++   KEYCHECKTABLE(VK_PRIOR)\
++   KEYCHECKTABLE(VK_NEXT)\
++   KEYCHECKTABLE(VK_END)\
++   KEYCHECKTABLE(VK_HOME)\
++   KEYCHECKTABLE(VK_LEFT)\
++   KEYCHECKTABLE(VK_UP)\
++   KEYCHECKTABLE(VK_RIGHT)\
++   KEYCHECKTABLE(VK_DOWN)\
++   KEYCHECKTABLE(VK_INSERT)\
++   KEYCHECKTABLE(VK_DELETE)\
++   KEYCHECKTABLE(VK_F1)\
++   KEYCHECKTABLE(VK_F2)\
++   KEYCHECKTABLE(VK_F3)\
++   KEYCHECKTABLE(VK_F4)\
++   KEYCHECKTABLE(VK_F5)\
++   KEYCHECKTABLE(VK_F6)\
++   KEYCHECKTABLE(VK_F7)\
++   KEYCHECKTABLE(VK_F8)\
++   KEYCHECKTABLE(VK_F9)\
++   KEYCHECKTABLE(VK_F10)\
++   KEYCHECKTABLE(VK_F11)\
++   KEYCHECKTABLE(VK_F12)\
++   KEYCHECKTABLE(VK_F13)\
++   KEYCHECKTABLE(VK_F14)\
++   KEYCHECKTABLE(VK_F15)\
++   KEYCHECKTABLE(VK_F16)\
++   KEYCHECKTABLE(VK_F17)\
++   KEYCHECKTABLE(VK_F18)\
++   KEYCHECKTABLE(VK_F19)\
++   KEYCHECKTABLE(VK_F20)
++ struct keycheck dbg_keycheck_FUNKY_TILDE[]={
++   KEYCHECKBLANK
++ };
++ struct keycheck dbg_keycheck_FUNKY_LINUX[]={
++   KEYCHECKBLANK
++ };
++ struct keycheck dbg_keycheck_FUNKY_XTERM[]={
++   KEYCHECKBLANK
++ };
++ struct keycheck dbg_keycheck_FUNKY_VT400[]={
++   KEYCHECKBLANK
++ };
++ struct keycheck dbg_keycheck_FUNKY_VT100P[]={
++   KEYCHECKBLANK
++ };
++ struct keycheck dbg_keycheck_FUNKY_SCO[]={
++   KEYCHECKBLANK
++ };
++ struct keycheck dbg_keycheck_FUNKY_XTERMNEW[]={
++   KEYCHECKBLANK
++ };
++ 
++ static void keycheck(FILE *fo,int funky_type,char *funky_type_name,struct keycheck *dbg_keycheck,unsigned ndbg_keycheck,unsigned *pmaxlen) {
++   size_t i,j,maxlen=*pmaxlen;
++   if (fo) fprintf(fo,"struct keycheck dbg_keycheck_%s[]=\x7B\n",funky_type_name); /* a 7B=brace messes up brace matching in editors */
++   for(i=0; i<ndbg_keycheck; i++) {
++     if (fo) fprintf(fo,"  KEYCHECKTABLE\x28/* %3u */ %-9s",dbg_keycheck[i].wParam,dbg_keycheck[i].desc);
++     for(j=0; j<KEYCHECK_KEYSTATES; j++) {
++       if (fo) {
++         char fmt[256];
++         char p[256];
++         size_t len;
++         char *pn;
++         memset(p,'\0',sizeof(p));
++         memset(p,'!',64); // let's catch us some buffer overflow bugs
++         p[sizeof(p)-1]='\0';
++         pn=(char *)format_keypad((unsigned char *)p, dbg_keycheck[i].wParam, funky_type, j); // Returns NULL if a key couldn't be found
++         len=0;
++         if (pn) {
++           fmt[len++]='"';
++           *pn='\0'; // format_keypad is not required to zero terminate strings.
++           pn=p;
++         } else pn="NULL";
++         for(; *pn; pn++) {
++           switch(*pn) {
++           case '\b': len+=sprintf(fmt+len,"\\b"); break;
++           case '\f': len+=sprintf(fmt+len,"\\f"); break;
++           case '\n': len+=sprintf(fmt+len,"\\n"); break;
++           case '\r': len+=sprintf(fmt+len,"\\r"); break;
++           case '\t': len+=sprintf(fmt+len,"\\t"); break;
++           case '\v': len+=sprintf(fmt+len,"\\v"); break;
++           case '"': len+=sprintf(fmt+len,"\\\x22"); break; /* more trouble with brace matching */
++           case '\'': len+=sprintf(fmt+len,"\\'"); break;
++           case '\\': len+=sprintf(fmt+len,"\\\\"); break;
++           default:
++             if (*pn<32 || *pn>=127) len+=sprintf(fmt+len,"\\x%2.2X",*(unsigned char *)pn);
++             else fmt[len++]=*pn;
++             break;
++           }
++         }
++         fmt[len]='\0';
++         if (fmt[0]=='"') fmt[len++]='"';
++         fmt[len]='\0';
++         if (maxlen<len) maxlen=len;
++         fprintf(fo,",%-*s",KEYCHECK_JUSTIFY,fmt);
++       } else {
++ /* My original test plan was to have tables of correct values which would be 
++  * compared by program and the bad ones would be listed. The first 
++  * step was to create starter tables with many correct values
++  * to be modified later but it turns out that was just
++  * perfect for testing. I didn't need to complete the code. */
++       }
++     }
++     if (fo) fprintf(fo,"\x29\n");
++   }
++   if (fo) fprintf(fo,"\x7D;\n\n");
++   *pmaxlen=maxlen;
++ }
++ 
++ #ifndef NELEM
++ #define NELEM(u) ( (sizeof(u)/sizeof(u[0])) )
++ #endif
++ /* "od -ta" at a linux console will show codes as typed */
++ static void keycheckgen(void) {
++   static int runonce=0;
++   if (!runonce) {
++     FILE *fo=fopen("C:\\table$.C","w");
++     Terminal temp;
++     memcpy(&temp,term,sizeof(temp));
++     //term->app_cursor_keys=TRUE; // Turn this on and off to ensure the right stuff switches
++     //term->funky_Foxpro=TRUE; // Comment this out to test non Foxpro keys
++     runonce=1;
++     if (fo) {
++       unsigned maxlen=0;
++ #define KEYCHECK(fo,FKY) keycheck(fo,FKY,#FKY,dbg_keycheck_##FKY,NELEM(dbg_keycheck_##FKY),&maxlen);
++       KEYCHECK(fo,FUNKY_TILDE);
++       KEYCHECK(fo,FUNKY_LINUX);
++       KEYCHECK(fo,FUNKY_XTERM);
++       KEYCHECK(fo,FUNKY_VT400);
++       KEYCHECK(fo,FUNKY_VT100P);
++       KEYCHECK(fo,FUNKY_SCO);
++       //KEYCHECK(fo,FUNKY_FOXPRO);
++       KEYCHECK(fo,FUNKY_XTERMNEW);
++       fprintf(fo,"/* longest string = %u\n",maxlen);
++       fclose(fo);
++     }
++     memcpy(term,&temp,sizeof(temp));
++   }
++ }
++ #else
++ #define keycheckgen()
++ #endif
++ 
+  /*
+   * Translate a WM_(SYS)?KEY(UP|DOWN) message into a string of ASCII
+***************
+*** 3909,3914 ****
+      BYTE keystate[256];
+      int scan, left_alt = 0, key_down, shift_state;
+!     int r, i, code;
+!     unsigned char *p = output;
+      static int alt_sum = 0;
+      int funky_type = conf_get_int(conf, CONF_funky_type);
+--- 4192,4198 ----
+      BYTE keystate[256];
+      int scan, left_alt = 0, key_down, shift_state;
+!     int r, i;
+!     unsigned char *p = output,*pn;
+!     char xkey;
+      static int alt_sum = 0;
+      int funky_type = conf_get_int(conf, CONF_funky_type);
+***************
+*** 3922,3926 ****
+      static int compose_char = 0;
+      static WPARAM compose_keycode = 0;
+! 
+      r = GetKeyboardState(keystate);
+      if (!r)
+--- 4206,4217 ----
+      static int compose_char = 0;
+      static WPARAM compose_keycode = 0;
+!   int funky_Foxpro=term->funky_Foxpro; /* This used to be a separate keyboard emulation but it was better to make it a mode. I decided there were too many things that force keyboard modes and this shouldn't be one of them. */
+!   keycheckgen();
+! #if 0
+!   if (wParam == VK_9) {
+!     *p='\0'; /* I can set breakpoints here */
+!     p[1]='\0';
+!   }
+! #endif
+      r = GetKeyboardState(keystate);
+      if (!r)
+***************
+*** 4022,4025 ****
+--- 4313,4319 ----
+  	/* And write back the 'adjusted' state */
+  	SetKeyboardState(keystate);
++ #if defined(TERM_INVCAPS_ENABLE) || defined(IDM_INVCAPS)
++ 	if ((g_InvertCapsLock == MF_CHECKED) != (TERM_INVCAPS!=0)) keystate[VK_CAPITAL] ^= 1;
++ #endif
+      }
+  
+***************
+*** 4030,4037 ****
+  
+      if ((HIWORD(lParam) & KF_ALTDOWN) && (keystate[VK_RMENU] & 0x80) == 0)
+! 	left_alt = 1;
+  
+!     key_down = ((HIWORD(lParam) & KF_UP) == 0);
+  
+      /* Make sure Ctrl-ALT is not the same as AltGr for ToAscii unless told. */
+      if (left_alt && (keystate[VK_CONTROL] & 0x80)) {
+--- 4324,4347 ----
+  
+      if ((HIWORD(lParam) & KF_ALTDOWN) && (keystate[VK_RMENU] & 0x80) == 0)
+! 	left_alt = SHIFTSTATE_ALT;
+  
+!     shift_state = ((keystate[VK_SHIFT] & 0x80)?SHIFTSTATE_SHIFT:0) | ((keystate[VK_CONTROL] & 0x80)?SHIFTSTATE_CTRL:0);
+!     scan = (HIWORD(lParam) & (KF_UP | KF_EXTENDED | 0xFF));
+  
++     if (wParam==VK_0 && shift_state==(SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL)) {
++ 	key_down = 1; /* ((HIWORD(lParam) & KF_UP) == 0); */
++ 	scan &= 0xFF; /* All this just to capture Ctrl+Shift+0 aka Ctrl+). Will anyone notice that it happens on WM_KEYUP unlike every other key? */
++     } else key_down=(message==WM_KEYDOWN || message==WM_SYSKEYDOWN);
++ 
++ #if 0 /* <-- Set to 1 to enable Left Windows Key as Meta key */
++     if ((keystate[VK_LWIN] & 0x80) && funky_type == FUNKY_XTERMNEW && !funky_Foxpro) {
++ 	if (key_down) {
++ 	    pn=format_keypad(p, wParam, funky_type, shift_state|left_alt|SHIFTSTATE_META ); // Returns NULL if a key couldn't be found
++ 	    if (pn) return pn-output;
++ 	}
++ 	return 0; /* All other keys blocked with Meta */
++     }
++ #endif
++   
+      /* Make sure Ctrl-ALT is not the same as AltGr for ToAscii unless told. */
+      if (left_alt && (keystate[VK_CONTROL] & 0x80)) {
+***************
+*** 4044,4051 ****
+      }
+  
+-     scan = (HIWORD(lParam) & (KF_UP | KF_EXTENDED | 0xFF));
+-     shift_state = ((keystate[VK_SHIFT] & 0x80) != 0)
+- 	+ ((keystate[VK_CONTROL] & 0x80) != 0) * 2;
+- 
+      /* Note if AltGr was pressed and if it was used as a compose key */
+      if (!compose_state) {
+--- 4354,4357 ----
+***************
+*** 4053,4060 ****
+  	if (conf_get_int(conf, CONF_compose_key)) {
+  	    if (wParam == VK_MENU && (HIWORD(lParam) & KF_EXTENDED))
+! 		compose_keycode = wParam;
+  	}
+  	if (wParam == VK_APPS)
+! 	    compose_keycode = wParam;
+      }
+  
+--- 4359,4366 ----
+  	if (conf_get_int(conf, CONF_compose_key)) {
+  	    if (wParam == VK_MENU && (HIWORD(lParam) & KF_EXTENDED))
+! 		compose_keycode = VK_MENU;
+  	}
+  	if (wParam == VK_APPS)
+! 	    compose_keycode = VK_APPS;
+      }
+  
+***************
+*** 4075,4296 ****
+      /* Sanitize the number pad if not using a PC NumPad */
+      if (left_alt || (term->app_keypad_keys && !no_applic_k
+! 		     && funky_type != FUNKY_XTERM)
+  	|| funky_type == FUNKY_VT400 || nethack_keypad || compose_state) {
+  	if ((HIWORD(lParam) & KF_EXTENDED) == 0) {
+! 	    int nParam = 0;
+  	    switch (wParam) {
+! 	      case VK_INSERT:
+! 		nParam = VK_NUMPAD0;
+! 		break;
+! 	      case VK_END:
+! 		nParam = VK_NUMPAD1;
+! 		break;
+! 	      case VK_DOWN:
+! 		nParam = VK_NUMPAD2;
+! 		break;
+! 	      case VK_NEXT:
+! 		nParam = VK_NUMPAD3;
+! 		break;
+! 	      case VK_LEFT:
+! 		nParam = VK_NUMPAD4;
+! 		break;
+! 	      case VK_CLEAR:
+! 		nParam = VK_NUMPAD5;
+! 		break;
+! 	      case VK_RIGHT:
+! 		nParam = VK_NUMPAD6;
+! 		break;
+! 	      case VK_HOME:
+! 		nParam = VK_NUMPAD7;
+! 		break;
+! 	      case VK_UP:
+! 		nParam = VK_NUMPAD8;
+! 		break;
+! 	      case VK_PRIOR:
+! 		nParam = VK_NUMPAD9;
+! 		break;
+! 	      case VK_DELETE:
+! 		nParam = VK_DECIMAL;
+! 		break;
+  	    }
+  	    if (nParam) {
+  		if (keystate[VK_NUMLOCK] & 1)
+! 		    shift_state |= 1;
+  		wParam = nParam;
+  	    }
+  	}
+      }
+! 
+      /* If a key is pressed and AltGr is not active */
+      if (key_down && (keystate[VK_RMENU] & 0x80) == 0 && !compose_state) {
+- 	/* Okay, prepare for most alts then ... */
+  	if (left_alt)
+! 	    *p++ = '\033';
+! 
+! 	/* Lets see if it's a pattern we know all about ... */
+! 	if (wParam == VK_PRIOR && shift_state == 1) {
+! 	    SendMessage(hwnd, WM_VSCROLL, SB_PAGEUP, 0);
+! 	    return 0;
+! 	}
+! 	if (wParam == VK_PRIOR && shift_state == 2) {
+! 	    SendMessage(hwnd, WM_VSCROLL, SB_LINEUP, 0);
+! 	    return 0;
+! 	}
+! 	if (wParam == VK_NEXT && shift_state == 1) {
+! 	    SendMessage(hwnd, WM_VSCROLL, SB_PAGEDOWN, 0);
+! 	    return 0;
+! 	}
+! 	if (wParam == VK_NEXT && shift_state == 2) {
+! 	    SendMessage(hwnd, WM_VSCROLL, SB_LINEDOWN, 0);
+! 	    return 0;
+! 	}
+! 	if ((wParam == VK_PRIOR || wParam == VK_NEXT) && shift_state == 3) {
+! 	    term_scroll_to_selection(term, (wParam == VK_PRIOR ? 0 : 1));
+! 	    return 0;
+! 	}
+! 	if (wParam == VK_INSERT && shift_state == 1) {
+! 	    request_paste(NULL);
+! 	    return 0;
+! 	}
+! 	if (left_alt && wParam == VK_F4 && conf_get_int(conf, CONF_alt_f4)) {
+! 	    return -1;
+! 	}
+! 	if (left_alt && wParam == VK_SPACE && conf_get_int(conf,
+! 							   CONF_alt_space)) {
+! 	    SendMessage(hwnd, WM_SYSCOMMAND, SC_KEYMENU, 0);
+! 	    return -1;
+! 	}
+! 	if (left_alt && wParam == VK_RETURN &&
+! 	    conf_get_int(conf, CONF_fullscreenonaltenter) &&
+! 	    (conf_get_int(conf, CONF_resize_action) != RESIZE_DISABLED)) {
+!  	    if ((HIWORD(lParam) & (KF_UP | KF_REPEAT)) != KF_REPEAT)
+!  		flip_full_screen();
+! 	    return -1;
+! 	}
+! 	/* Control-Numlock for app-keypad mode switch */
+! 	if (wParam == VK_PAUSE && shift_state == 2) {
+! 	    term->app_keypad_keys ^= 1;
+! 	    return 0;
+! 	}
+  
+  	/* Nethack keypad */
+  	if (nethack_keypad && !left_alt) {
+  	    switch (wParam) {
+! 	      case VK_NUMPAD1:
+! 		*p++ = "bB\002\002"[shift_state & 3];
+! 		return p - output;
+! 	      case VK_NUMPAD2:
+! 		*p++ = "jJ\012\012"[shift_state & 3];
+! 		return p - output;
+! 	      case VK_NUMPAD3:
+! 		*p++ = "nN\016\016"[shift_state & 3];
+! 		return p - output;
+! 	      case VK_NUMPAD4:
+! 		*p++ = "hH\010\010"[shift_state & 3];
+! 		return p - output;
+! 	      case VK_NUMPAD5:
+! 		*p++ = shift_state ? '.' : '.';
+! 		return p - output;
+! 	      case VK_NUMPAD6:
+! 		*p++ = "lL\014\014"[shift_state & 3];
+! 		return p - output;
+! 	      case VK_NUMPAD7:
+! 		*p++ = "yY\031\031"[shift_state & 3];
+! 		return p - output;
+! 	      case VK_NUMPAD8:
+! 		*p++ = "kK\013\013"[shift_state & 3];
+! 		return p - output;
+! 	      case VK_NUMPAD9:
+! 		*p++ = "uU\025\025"[shift_state & 3];
+! 		return p - output;
+  	    }
+  	}
+  
+  	/* Application Keypad */
+! 	if (!left_alt) {
+! 	    int xkey = 0;
+! 
+  	    if (funky_type == FUNKY_VT400 ||
+  		(funky_type <= FUNKY_LINUX &&
+! 		 term->app_keypad_keys && !no_applic_k)) switch (wParam) {
+! 		  case VK_EXECUTE:
+! 		    xkey = 'P';
+! 		    break;
+! 		  case VK_DIVIDE:
+! 		    xkey = 'Q';
+! 		    break;
+! 		  case VK_MULTIPLY:
+! 		    xkey = 'R';
+! 		    break;
+! 		  case VK_SUBTRACT:
+! 		    xkey = 'S';
+! 		    break;
+! 		}
+! 	    if (term->app_keypad_keys && !no_applic_k)
+  		switch (wParam) {
+! 		  case VK_NUMPAD0:
+! 		    xkey = 'p';
+! 		    break;
+! 		  case VK_NUMPAD1:
+! 		    xkey = 'q';
+! 		    break;
+! 		  case VK_NUMPAD2:
+! 		    xkey = 'r';
+! 		    break;
+! 		  case VK_NUMPAD3:
+! 		    xkey = 's';
+! 		    break;
+! 		  case VK_NUMPAD4:
+! 		    xkey = 't';
+! 		    break;
+! 		  case VK_NUMPAD5:
+! 		    xkey = 'u';
+! 		    break;
+! 		  case VK_NUMPAD6:
+! 		    xkey = 'v';
+! 		    break;
+! 		  case VK_NUMPAD7:
+! 		    xkey = 'w';
+! 		    break;
+! 		  case VK_NUMPAD8:
+! 		    xkey = 'x';
+! 		    break;
+! 		  case VK_NUMPAD9:
+! 		    xkey = 'y';
+! 		    break;
+! 
+! 		  case VK_DECIMAL:
+! 		    xkey = 'n';
+! 		    break;
+  		  case VK_ADD:
+! 		    if (funky_type == FUNKY_XTERM) {
+! 			if (shift_state)
+! 			    xkey = 'l';
+! 			else
+! 			    xkey = 'k';
+! 		    } else if (shift_state)
+! 			xkey = 'm';
+! 		    else
+! 			xkey = 'l';
+! 		    break;
+! 
+! 		  case VK_DIVIDE:
+! 		    if (funky_type == FUNKY_XTERM)
+! 			xkey = 'o';
+! 		    break;
+! 		  case VK_MULTIPLY:
+! 		    if (funky_type == FUNKY_XTERM)
+! 			xkey = 'j';
+! 		    break;
+! 		  case VK_SUBTRACT:
+! 		    if (funky_type == FUNKY_XTERM)
+! 			xkey = 'm';
+! 		    break;
+! 
+! 		  case VK_RETURN:
+! 		    if (HIWORD(lParam) & KF_EXTENDED)
+! 			xkey = 'M';
+  		    break;
+! 		}
+  	    if (xkey) {
+  		if (term->vt52_mode) {
+--- 4381,4625 ----
+      /* Sanitize the number pad if not using a PC NumPad */
+      if (left_alt || (term->app_keypad_keys && !no_applic_k
+! 		     && (funky_type <= FUNKY_LINUX && !funky_Foxpro))
+  	|| funky_type == FUNKY_VT400 || nethack_keypad || compose_state) {
+  	if ((HIWORD(lParam) & KF_EXTENDED) == 0) {
+! 	    WPARAM nParam = 0;
+  	    switch (wParam) {
+! 	      case VK_INSERT: nParam = VK_NUMPAD0; break;
+! 	      case VK_END:    nParam = VK_NUMPAD1; break;
+! 	      case VK_DOWN:   nParam = VK_NUMPAD2; break;
+! 	      case VK_NEXT:   nParam = VK_NUMPAD3; break;
+! 	      case VK_LEFT:   nParam = VK_NUMPAD4; break;
+! 	      case VK_CLEAR:  nParam = VK_NUMPAD5; break;
+! 	      case VK_RIGHT:  nParam = VK_NUMPAD6; break;
+! 	      case VK_HOME:   nParam = VK_NUMPAD7; break;
+! 	      case VK_UP:     nParam = VK_NUMPAD8; break;
+! 	      case VK_PRIOR:  nParam = VK_NUMPAD9; break;
+! 	      case VK_DELETE: nParam = VK_DECIMAL; break;
+  	    }
+  	    if (nParam) {
+  		if (keystate[VK_NUMLOCK] & 1)
+! 		    shift_state |= SHIFTSTATE_SHIFT;
+  		wParam = nParam;
+  	    }
+  	}
+      }
+! #if 0 // seems that Putty+Windows already does this
+!   else if (funky_type == FUNKY_XTERMNEW || funky_Foxpro) { /* PC Keyboard FTW! */
+!     if (1 || (HIWORD(lParam) & KF_EXTENDED) != 0) { /* I don't want to run an 84 keyboard just to have 84 key behavior. */
+! /* FPD 2.6a (DOS and Command Prompt seem to be the same): [Ctrl+] is move faster
+!  * Numlock Off: [Ctrl+]Numpad as move, Shift+Numpad as digits, Ctrl+Shift+Numpad as Move and Mark faster
+!  * Numlock On: Numpad as digits, Shift+Numpad as move and mark text, Ctrl+Numpad as move faster, Shift+Ctrl+Numpad as move and mark text faster
+!  * Nothing but FAIL above this point. I don't recall older versions being this horrible. The numpad is unusable.
+!  *
+!  * This is how most Windows programs work and as a former 84 Keyboard user this is the way *I* want it to work! 
+!  * My XtermNew/Foxpro modes:
+!  *   Numlock Off: [Ctrl+]Numpad as move, [Ctrl+]Shift+Numpad as move and mark text (Ctrl=move faster), Shift never produces digits
+!  *   Numlock On: Numpad as digits, Ctrl+Numpad as nothing, Shift+Numpad as move, Ctrl+Shift+Numpad as move faster
+!  * And for anyone who asks, yes, I want it this way not in app_keypad_keys mode! Application mode is meaningless  
+!  *   when you have a 101 keyboard. I want my keyboard to behave
+!  *   like a PC Keyboard at all times even at a shell prompt, think "bc". Press NUM_LOCK if you don't like it! */
+!       nParam = 0;
+!       switch (wParam) {
+!       case VK_NUMPAD0: nParam = VK_INSERT; break;
+!       case VK_NUMPAD1: nParam = VK_END; break;
+!       case VK_NUMPAD2: nParam = VK_DOWN; break;
+!       case VK_NUMPAD3: nParam = VK_NEXT; break;
+!       case VK_NUMPAD4: nParam = VK_LEFT; break;
+!       case VK_NUMPAD5: nParam = VK_CLEAR; break;
+!       case VK_NUMPAD6: nParam = VK_RIGHT; break;
+!       case VK_NUMPAD7: nParam = VK_HOME; break;
+!       case VK_NUMPAD8: nParam = VK_UP; break;
+!       case VK_NUMPAD9: nParam = VK_PRIOR; break;
+!       case VK_DECIMAL: nParam = VK_DELETE; break;
+!      
+!       if (nParam) {
+!         if (!(keystate[VK_NUMLOCK] & 1)) {
+!           //shift_state |= SHIFTSTATE_SHIFT;
+!           wParam = nParam;
+!         }
+!       }
+!     }
+!   }
+! #endif
+      /* If a key is pressed and AltGr is not active */
+      if (key_down && (keystate[VK_RMENU] & 0x80) == 0 && !compose_state) {
+  	if (left_alt)
+!         {
+!       switch(wParam) {
+!       case VK_F4:
+!         if (conf_get_int(conf, CONF_alt_f4)) return -1;
+!         break;
+!       case VK_SPACE:
+!         if (conf_get_int(conf,CONF_alt_space)) {
+!           SendMessage(hwnd, WM_SYSCOMMAND, SC_KEYMENU, 0);
+!           return -1;
+!         }
+!       break;
+!       case VK_RETURN:
+!         if (conf_get_int(conf, CONF_fullscreenonaltenter) 
+!          &&(conf_get_int(conf, CONF_resize_action) != RESIZE_DISABLED)
+!          &&((HIWORD(lParam) & (KF_UP | KF_REPEAT)) != KF_REPEAT) ) {
+!             flip_full_screen();
+!             return -1;
+!           }
+!         break;
+!       case VK_BACK:
+!       goto alt_VK_BACK; /* Alt-Backspace often used for delete previous word */
+!       case VK_D:
+!       case VK_E:
+!       case VK_F:
+!       case VK_P:
+!       case VK_R:
+!       case VK_S:
+!       case VK_W:
+!         if (funky_Foxpro /*&& term->app_keypad_keys && !no_applic_k*/ && shift_state==0) { /* This gets Alt + all the default menu letters */
+!           pn=format_keypad(p, VK_F10, funky_type, 0 );
+!           if (pn) {
+!             *pn++=wParam;
+!             return pn-output;
+!           }
+!         }
+!         break;
+!       case VK_DIVIDE:
+!       case VK_MULTIPLY:
+!       case VK_SUBTRACT:
+!       case VK_ADD:
+!         return 0;
+!       }
+!     } else /* if (!left_alt) */ {
+!       switch(wParam) { /* Lets see if it's a pattern we know all about ... */
+!       case VK_PRIOR:
+!         if (funky_type != FUNKY_XTERMNEW && !funky_Foxpro) {
+!           if (shift_state == SHIFTSTATE_SHIFT) { SendMessage(hwnd, WM_VSCROLL, SB_PAGEUP, 0); return 0; }
+!           else if (shift_state == SHIFTSTATE_CTRL) { SendMessage(hwnd, WM_VSCROLL, SB_LINEUP, 0); return 0; }
+!           else if (shift_state == (SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL)) { term_scroll_to_selection(term,0); return 0; }
+!         }
+!         break;
+!       case VK_NEXT:
+!         if (funky_type != FUNKY_XTERMNEW && !funky_Foxpro) {
+!           if (shift_state == SHIFTSTATE_SHIFT) { SendMessage(hwnd, WM_VSCROLL, SB_PAGEDOWN, 0); return 0; }
+!           else if (shift_state == SHIFTSTATE_CTRL) { SendMessage(hwnd, WM_VSCROLL, SB_LINEDOWN, 0); return 0; }
+!           else if (shift_state == (SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL)) { term_scroll_to_selection(term, 1); return 0; }
+!           }
+!         break;
+!       case VK_INSERT:
+!         if (funky_type != FUNKY_XTERMNEW || funky_Foxpro) { /* mcedit uses this, Fox accepts the key but doesn't do anything with it */
+!           if (shift_state == 1) { /* This might need a check box because I can see reasons for having disabled or not */
+!             request_paste(NULL);
+!             return 0;
+!           }
+!         }
+!         break;
+! alt_VK_BACK: *p++ = '\033';
+!       case VK_BACK:
+!         if (shift_state == 0) { /* Backspace */
+!           *p++ = (conf_get_int(conf, CONF_bksp_is_delete) ? 0x7F : 0x08); *p++ = 0; return -2;
+!         }
+!         if (shift_state == SHIFTSTATE_SHIFT) {  /* Shift Backspace, We do the opposite of what is configured */
+!           *p++ = (conf_get_int(conf, CONF_bksp_is_delete) ? 0x08 : 0x7F); *p++ = 0; return -2;
+!         }
+!         break;
+!       case VK_TAB:
+!         if (shift_state == SHIFTSTATE_SHIFT) {  /* Shift tab */
+!           *p++ = 0x1B; *p++ = '['; *p++ = 'Z'; return p - output;
+!         }
+!         if (shift_state == SHIFTSTATE_CTRL) {   /* Ctrl+TAB sends ESC+TAB for Tab Completion in mc. We'd like to use Alt-Tab but that's not available on Windows. */
+!           *p++ = 0x1B; *p++ = 0x09; return p - output;
+!         }
+!         break;
+!       case VK_SPACE:
+!         if (!funky_Foxpro) {
+!           if (shift_state == SHIFTSTATE_CTRL) {   /* Ctrl-Space for NUL byte ^@ */
+!             *p++ = 0; return p - output;
+!           }
+!           if (shift_state == (SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL)) {    /* Ctrl-Shift-Space */
+!             *p++ = 160;
+!             return p - output;
+!           }
+!         }
+!         break;
+!       case VK_CANCEL:
+!         if (shift_state == SHIFTSTATE_CTRL) {   /* Ctrl-Break */
+!           if (back) back->special(backhandle, TS_BRK);
+!           return 0;
+!         }
+!         break;
+!       case VK_PAUSE:       /* Break/Pause */
+!         if (shift_state == SHIFTSTATE_CTRL) { /* Control-Numlock for app-keypad mode switch */
+!           term->app_keypad_keys ^= 1;
+!           return 0;
+!         }
+!         *p++ = 26; /* ^Z - Suspend */
+!         *p++ = 0;
+!         return -2;
+!       }
+  
+  	/* Nethack keypad */
+  	if (nethack_keypad && !left_alt) {
+  	    switch (wParam) {
+! 	      case VK_NUMPAD1: *p++ = "bB\002\002"[shift_state & (SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL)]; return p - output;
+! 	      case VK_NUMPAD2: *p++ = "jJ\012\012"[shift_state & (SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL)]; return p - output;
+! 	      case VK_NUMPAD3: *p++ = "nN\016\016"[shift_state & (SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL)]; return p - output;
+! 	      case VK_NUMPAD4: *p++ = "hH\010\010"[shift_state & (SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL)]; return p - output;
+! 	      case VK_NUMPAD5: *p++ = shift_state ? '.' : '.'; return p - output;
+! 	      case VK_NUMPAD6: *p++ = "lL\014\014"[shift_state & (SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL)]; return p - output;
+! 	      case VK_NUMPAD7: *p++ = "yY\031\031"[shift_state & (SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL)]; return p - output;
+! 	      case VK_NUMPAD8: *p++ = "kK\013\013"[shift_state & (SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL)]; return p - output;
+! 	      case VK_NUMPAD9: *p++ = "uU\025\025"[shift_state & (SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL)]; return p - output;
+  	    }
+  	}
+  
++     if (!funky_Foxpro) {
+  	/* Application Keypad */
+!       xkey = 0; 
+!       int alwayssend=0;
+  	    if (funky_type == FUNKY_VT400 ||
+  		(funky_type <= FUNKY_LINUX &&
+! 		 term->app_keypad_keys && !no_applic_k)) {
+  		switch (wParam) {
+!         	  case VK_EXECUTE:  xkey = 'P'; break; /* This here decides whether we alwayssend or not */
+!         	  case VK_DIVIDE:   xkey = 'Q'; break;
+!         	  case VK_MULTIPLY: xkey = 'R'; break;
+!         	  case VK_SUBTRACT: xkey = 'S'; break;
+! 		}
+! 		alwayssend=1; /* For keyboard emulations that send a code on NumLock the local setting of NumLock is ignored */
+! 	    }
+! 	    if (term->app_keypad_keys && !no_applic_k) switch (wParam) {
+! 	          /* These are the dual function keys that change when NumLock is pressed. 
+! 		   * For emulations like Tilde & Linux console that send a code for Numlock, the host 
+! 		   * maintains the NumLock mode so we always send these keys. For VT52 and VT400 the mode
+! 		   * is required so we always send these keys. For other modes we use the local
+! 		   * setting for NumLock and send movement or digits, but never these codes for the dual function keys. These 
+! 		   * used to be sent for the SCO keyboard but I cut that out because it appears
+! 		   * to be wrong. This code must modified in conjuction with the Sanitize...NumPad 
+! 		   * code above. Keep in mind that the Sanitize code applies to more than 
+! 		   * our goofy little mode. */
+! 		  /* This checks out with the Linux console, SCO console, xterm, and XFCETerm. 
+! 		   * I have not duplicated XFCETerm keys KP_7-HOME ^[[1 and KP_1-END ^[[4. They appear to be 
+! 		   * wrong because they are not the same as HOME ^[OH and END ^[OF. */
+! 	          case VK_NUMPAD0: if (term->vt52_mode || alwayssend) xkey = 'p'; break;
+! 	          case VK_NUMPAD1: if (term->vt52_mode || alwayssend) xkey = 'q'; break;
+! 	          case VK_NUMPAD2: if (term->vt52_mode || alwayssend) xkey = 'r'; break;
+! 	          case VK_NUMPAD3: if (term->vt52_mode || alwayssend) xkey = 's'; break;
+! 	          case VK_NUMPAD4: if (term->vt52_mode || alwayssend) xkey = 't'; break;
+! 	          case VK_NUMPAD5: if (term->vt52_mode || alwayssend) xkey = 'u'; break;
+! 	          case VK_NUMPAD6: if (term->vt52_mode || alwayssend) xkey = 'v'; break;
+! 	          case VK_NUMPAD7: if (term->vt52_mode || alwayssend) xkey = 'w'; break;
+! 	          case VK_NUMPAD8: if (term->vt52_mode || alwayssend) xkey = 'x'; break;
+! 	          case VK_NUMPAD9: if (term->vt52_mode || alwayssend) xkey = 'y'; break;
+! 	          case VK_DECIMAL: if (term->vt52_mode || alwayssend) xkey = 'n'; break;
+! 		  /* These are the single function keys which do send codes for most emulations. VT100+ varies a bit. */
+  		  case VK_ADD:
+! 		    if (funky_type == FUNKY_XTERM || funky_type == FUNKY_XTERMNEW) {
+! 		        if (shift_state&SHIFTSTATE_CTRL) return 0;
+! 			xkey=(shift_state)?'l':'k'; /* Shift Keypad + is Keypad Minus */
+! 		    } else xkey=(shift_state)?'m':'l';
+  		    break;
+! 		  case VK_DIVIDE:   if (funky_type == FUNKY_XTERM || funky_type == FUNKY_XTERMNEW) if (shift_state) return 0; else xkey = 'o'; break; /* mc uses these */
+! 		  case VK_MULTIPLY: if (funky_type == FUNKY_XTERM || funky_type == FUNKY_XTERMNEW) if (shift_state) return 0; else xkey = 'j'; break; /* xterm implements 2-16 Sun modifers for these keys but I don't see any point in doing that */
+! 		  case VK_SUBTRACT: if (funky_type == FUNKY_XTERM || funky_type == FUNKY_XTERMNEW) if (shift_state) return 0; else xkey = 'm'; break;
+! 		  case VK_RETURN:   if ((HIWORD(lParam) & KF_EXTENDED)) xkey = 'M'; break;
+!     	    }
+  	    if (xkey) {
+  		if (term->vt52_mode) {
+***************
+*** 4299,4360 ****
+  		    else
+  			p += sprintf((char *) p, "\x1B?%c", xkey);
+! 		} else
+! 		    p += sprintf((char *) p, "\x1BO%c", xkey);
+! 		return p - output;
+  	    }
+! 	}
+! 
+! 	if (wParam == VK_BACK && shift_state == 0) {	/* Backspace */
+! 	    *p++ = (conf_get_int(conf, CONF_bksp_is_delete) ? 0x7F : 0x08);
+! 	    *p++ = 0;
+! 	    return -2;
+! 	}
+! 	if (wParam == VK_BACK && shift_state == 1) {	/* Shift Backspace */
+! 	    /* We do the opposite of what is configured */
+! 	    *p++ = (conf_get_int(conf, CONF_bksp_is_delete) ? 0x08 : 0x7F);
+! 	    *p++ = 0;
+! 	    return -2;
+! 	}
+! 	if (wParam == VK_TAB && shift_state == 1) {	/* Shift tab */
+! 	    *p++ = 0x1B;
+! 	    *p++ = '[';
+! 	    *p++ = 'Z';
+! 	    return p - output;
+! 	}
+! 	if (wParam == VK_SPACE && shift_state == 2) {	/* Ctrl-Space */
+! 	    *p++ = 0;
+! 	    return p - output;
+! 	}
+! 	if (wParam == VK_SPACE && shift_state == 3) {	/* Ctrl-Shift-Space */
+! 	    *p++ = 160;
+! 	    return p - output;
+! 	}
+! 	if (wParam == VK_CANCEL && shift_state == 2) {	/* Ctrl-Break */
+! 	    if (back)
+! 		back->special(backhandle, TS_BRK);
+! 	    return 0;
+! 	}
+! 	if (wParam == VK_PAUSE) {      /* Break/Pause */
+! 	    *p++ = 26;
+! 	    *p++ = 0;
+! 	    return -2;
+! 	}
+! 	/* Control-2 to Control-8 are special */
+! 	if (shift_state == 2 && wParam >= '2' && wParam <= '8') {
+! 	    *p++ = "\000\033\034\035\036\037\177"[wParam - '2'];
+! 	    return p - output;
+! 	}
+! 	if (shift_state == 2 && (wParam == 0xBD || wParam == 0xBF)) {
+! 	    *p++ = 0x1F;
+! 	    return p - output;
+! 	}
+! 	if (shift_state == 2 && (wParam == 0xDF || wParam == 0xDC)) {
+! 	    *p++ = 0x1C;
+! 	    return p - output;
+! 	}
+! 	if (shift_state == 3 && wParam == 0xDE) {
+! 	    *p++ = 0x1E;	       /* Ctrl-~ == Ctrl-^ in xterm at least */
+! 	    return p - output;
+! 	}
+  	if (shift_state == 0 && wParam == VK_RETURN && term->cr_lf_return) {
+  	    *p++ = '\r';
+--- 4628,4655 ----
+  		    else
+  			p += sprintf((char *) p, "\x1B?%c", xkey);
+! 		    return p - output;
+! 		} else {
+! 		    if ((keystate[VK_NUMLOCK] & 1) == 0 || alwayssend) {
+! 		        p += sprintf((char *) p, "\x1BO%c", xkey);
+! 		        return p - output;
+! 		    }
+! 		}
+  	    }
+!     }
+!         
+!       if (shift_state == SHIFTSTATE_CTRL) {
+!         if ((wParam == VK_OEM_MINUS || wParam == VK_OEM_2 && !funky_Foxpro)) {
+!           *p++ = 0x1F;
+!           return p - output;
+!         }
+!         if ((wParam == VK_OEM_8 || wParam == VK_OEM_5)) {
+!           *p++ = 0x1C;
+!           return p - output;
+!         }
+!         if (!funky_Foxpro && wParam == VK_OEM_7) {
+!           *p++ = 0x1E;         /* Ctrl-~ == Ctrl-^ in xterm at least */
+!           return p - output;
+!         }
+!       }
+  	if (shift_state == 0 && wParam == VK_RETURN && term->cr_lf_return) {
+  	    *p++ = '\r';
+***************
+*** 4362,4563 ****
+  	    return p - output;
+  	}
+  
+! 	/*
+! 	 * Next, all the keys that do tilde codes. (ESC '[' nn '~',
+! 	 * for integer decimal nn.)
+! 	 *
+! 	 * We also deal with the weird ones here. Linux VCs replace F1
+! 	 * to F5 by ESC [ [ A to ESC [ [ E. rxvt doesn't do _that_, but
+! 	 * does replace Home and End (1~ and 4~) by ESC [ H and ESC O w
+! 	 * respectively.
+! 	 */
+! 	code = 0;
+! 	switch (wParam) {
+! 	  case VK_F1:
+! 	    code = (keystate[VK_SHIFT] & 0x80 ? 23 : 11);
+! 	    break;
+! 	  case VK_F2:
+! 	    code = (keystate[VK_SHIFT] & 0x80 ? 24 : 12);
+! 	    break;
+! 	  case VK_F3:
+! 	    code = (keystate[VK_SHIFT] & 0x80 ? 25 : 13);
+! 	    break;
+! 	  case VK_F4:
+! 	    code = (keystate[VK_SHIFT] & 0x80 ? 26 : 14);
+! 	    break;
+! 	  case VK_F5:
+! 	    code = (keystate[VK_SHIFT] & 0x80 ? 28 : 15);
+! 	    break;
+! 	  case VK_F6:
+! 	    code = (keystate[VK_SHIFT] & 0x80 ? 29 : 17);
+! 	    break;
+! 	  case VK_F7:
+! 	    code = (keystate[VK_SHIFT] & 0x80 ? 31 : 18);
+! 	    break;
+! 	  case VK_F8:
+! 	    code = (keystate[VK_SHIFT] & 0x80 ? 32 : 19);
+! 	    break;
+! 	  case VK_F9:
+! 	    code = (keystate[VK_SHIFT] & 0x80 ? 33 : 20);
+! 	    break;
+! 	  case VK_F10:
+! 	    code = (keystate[VK_SHIFT] & 0x80 ? 34 : 21);
+! 	    break;
+! 	  case VK_F11:
+! 	    code = 23;
+! 	    break;
+! 	  case VK_F12:
+! 	    code = 24;
+! 	    break;
+! 	  case VK_F13:
+! 	    code = 25;
+! 	    break;
+! 	  case VK_F14:
+! 	    code = 26;
+! 	    break;
+! 	  case VK_F15:
+! 	    code = 28;
+! 	    break;
+! 	  case VK_F16:
+! 	    code = 29;
+! 	    break;
+! 	  case VK_F17:
+! 	    code = 31;
+! 	    break;
+! 	  case VK_F18:
+! 	    code = 32;
+! 	    break;
+! 	  case VK_F19:
+! 	    code = 33;
+! 	    break;
+! 	  case VK_F20:
+! 	    code = 34;
+! 	    break;
+! 	}
+! 	if ((shift_state&2) == 0) switch (wParam) {
+! 	  case VK_HOME:
+! 	    code = 1;
+! 	    break;
+! 	  case VK_INSERT:
+! 	    code = 2;
+! 	    break;
+! 	  case VK_DELETE:
+! 	    code = 3;
+! 	    break;
+! 	  case VK_END:
+! 	    code = 4;
+! 	    break;
+! 	  case VK_PRIOR:
+! 	    code = 5;
+! 	    break;
+! 	  case VK_NEXT:
+! 	    code = 6;
+! 	    break;
+! 	}
+! 	/* Reorder edit keys to physical order */
+! 	if (funky_type == FUNKY_VT400 && code <= 6)
+! 	    code = "\0\2\1\4\5\3\6"[code];
+! 
+! 	if (term->vt52_mode && code > 0 && code <= 6) {
+! 	    p += sprintf((char *) p, "\x1B%c", " HLMEIG"[code]);
+! 	    return p - output;
+! 	}
+! 
+! 	if (funky_type == FUNKY_SCO && code >= 11 && code <= 34) {
+! 	    /* SCO function keys */
+! 	    char codes[] = "MNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz@[\\]^_`{";
+! 	    int index = 0;
+! 	    switch (wParam) {
+! 	      case VK_F1: index = 0; break;
+! 	      case VK_F2: index = 1; break;
+! 	      case VK_F3: index = 2; break;
+! 	      case VK_F4: index = 3; break;
+! 	      case VK_F5: index = 4; break;
+! 	      case VK_F6: index = 5; break;
+! 	      case VK_F7: index = 6; break;
+! 	      case VK_F8: index = 7; break;
+! 	      case VK_F9: index = 8; break;
+! 	      case VK_F10: index = 9; break;
+! 	      case VK_F11: index = 10; break;
+! 	      case VK_F12: index = 11; break;
+! 	    }
+! 	    if (keystate[VK_SHIFT] & 0x80) index += 12;
+! 	    if (keystate[VK_CONTROL] & 0x80) index += 24;
+! 	    p += sprintf((char *) p, "\x1B[%c", codes[index]);
+! 	    return p - output;
+! 	}
+! 	if (funky_type == FUNKY_SCO &&     /* SCO small keypad */
+! 	    code >= 1 && code <= 6) {
+! 	    char codes[] = "HL.FIG";
+! 	    if (code == 3) {
+! 		*p++ = '\x7F';
+! 	    } else {
+! 		p += sprintf((char *) p, "\x1B[%c", codes[code-1]);
+! 	    }
+! 	    return p - output;
+! 	}
+! 	if ((term->vt52_mode || funky_type == FUNKY_VT100P) && code >= 11 && code <= 24) {
+! 	    int offt = 0;
+! 	    if (code > 15)
+! 		offt++;
+! 	    if (code > 21)
+! 		offt++;
+! 	    if (term->vt52_mode)
+! 		p += sprintf((char *) p, "\x1B%c", code + 'P' - 11 - offt);
+! 	    else
+! 		p +=
+! 		    sprintf((char *) p, "\x1BO%c", code + 'P' - 11 - offt);
+! 	    return p - output;
+! 	}
+! 	if (funky_type == FUNKY_LINUX && code >= 11 && code <= 15) {
+! 	    p += sprintf((char *) p, "\x1B[[%c", code + 'A' - 11);
+! 	    return p - output;
+! 	}
+! 	if (funky_type == FUNKY_XTERM && code >= 11 && code <= 14) {
+! 	    if (term->vt52_mode)
+! 		p += sprintf((char *) p, "\x1B%c", code + 'P' - 11);
+! 	    else
+! 		p += sprintf((char *) p, "\x1BO%c", code + 'P' - 11);
+! 	    return p - output;
+! 	}
+! 	if ((code == 1 || code == 4) &&
+! 	    conf_get_int(conf, CONF_rxvt_homeend)) {
+! 	    p += sprintf((char *) p, code == 1 ? "\x1B[H" : "\x1BOw");
+! 	    return p - output;
+! 	}
+! 	if (code) {
+! 	    p += sprintf((char *) p, "\x1B[%d~", code);
+! 	    return p - output;
+! 	}
+! 
+! 	/*
+! 	 * Now the remaining keys (arrows and Keypad 5. Keypad 5 for
+! 	 * some reason seems to send VK_CLEAR to Windows...).
+! 	 */
+! 	{
+! 	    char xkey = 0;
+! 	    switch (wParam) {
+! 	      case VK_UP:
+! 		xkey = 'A';
+! 		break;
+! 	      case VK_DOWN:
+! 		xkey = 'B';
+! 		break;
+! 	      case VK_RIGHT:
+! 		xkey = 'C';
+! 		break;
+! 	      case VK_LEFT:
+! 		xkey = 'D';
+! 		break;
+! 	      case VK_CLEAR:
+! 		xkey = 'G';
+! 		break;
+! 	    }
+! 	    if (xkey) {
+! 		p += format_arrow_key(p, term, xkey, shift_state);
+! 		return p - output;
+! 	    }
+! 	}
+! 
+  	/*
+  	 * Finally, deal with Return ourselves. (Win95 seems to
+--- 4657,4792 ----
+  	    return p - output;
+  	}
++ #ifndef VK_OEM_MINUS /* _ - */
++ #define VK_OEM_MINUS (0xBD) /* http://www.kbdedit.com/manual/low_level_vk_list.html */
++ #endif
++ #ifndef VK_OEM_1 /* : ; */
++ #define VK_OEM_1 (0xBA)
++ #endif
++ #ifndef VK_OEM_2 /* ? / */
++ #define VK_OEM_2 (0xBF)
++ #endif
++ #ifndef VK_OEM_3 /* ~ ` */
++ #define VK_OEM_3 (0xC0)
++ #endif
++ #ifndef VK_OEM_4 /* { [       ]} I must put the extra braces in to keep brace matching working. */
++ #define VK_OEM_4 (0xDB)
++ #endif
++ #ifndef VK_OEM_5 /* | \ */
++ #define VK_OEM_5 (0xDC)
++ #endif
++ #ifndef VK_OEM_6 /*[{     } ] */
++ #define VK_OEM_6 (0xDD)
++ #endif
++ #ifndef VK_OEM_7 /* " ' */
++ #define VK_OEM_7 (0xDE)
++ #endif
++ #ifndef VK_OEM_8 /* § ! */
++ #define VK_OEM_8 (0xDF)
++ #endif
++       /* This gets Ctrl & Shift Control letters numbers to ID correctly in Shift-F10 macro recorder */
++       /* except that this may not be the best method for international keyboards. Maybe it should be done on the characters below */
++       if (funky_Foxpro /* && (term->app_keypad_keys || no_applic_k)*/) { /* You should turn on app_keypad_keys for Foxpro, but if you don't these will still work, they'll just interfere at a shell prompt */
++         int private_shift_state=shift_state; /* Tell me you can accomplish all this in Zoc's function key mapper... */ 
++         //if ((wParam == VK_RETURN || wParam == VK_SPACE) && shift_state==SHIFTSTATE_SHIFT) goto foxctrlmodifier; /* These keys can go with shift only */
++         /* VK_SPACE made typing in vi impossible. ^P ^P everywhere. allow it through if you really need Shift+Space */
++         /* I see no point for leaving in Shift+Return. Who would use this as an accelerator key? */
++         if (shift_state & SHIFTSTATE_CTRL) { /* The important ones will be taken above */
++           xkey=(char)(unsigned char)wParam;
++           switch(wParam) {
++           case VK_0: /* How is a human supposed to remember all this? It's hard enough to do by computer! */
++           case VK_1: /* FPU supports considerably more keys than FPD. FPD supports Shift 0-9 through the keypad */
++           case VK_2:
++           case VK_3:
++           case VK_4: /* This group allows only Ctrl+Shift keys. Shift & Control are left on so both modifers are sent. ^P^Y#^P */
++           case VK_5:
++           case VK_6:
++           case VK_7:
++           case VK_8:
++           case VK_9:
++           case VK_P: /* This is likely the most valuable use of goto anywhere in C. Clear, obvious, simple! */
++           case VK_Y: if (shift_state & SHIFTSTATE_SHIFT) { goto foxctrlmodifier; }
++             break; /* The sacred keys must go untouched: ^P=shift modifer ^Y=ctrl modifier */
++           case VK_X: if (shift_state & SHIFTSTATE_SHIFT) {  private_shift_state &= ~SHIFTSTATE_CTRL; goto foxctrlmodifier; }
++             break;
++           case VK_A:
++           case VK_B:
++           case VK_C:
++           case VK_D:
++           case VK_E:
++           case VK_F:
++           case VK_G:
++           case VK_K: /* This group allows Ctrl & Ctrl + Shift, sends the Ctrl keycode, and might send the Shift Modifier ^K or ^P^K^P */
++           case VK_L:
++           case VK_N:
++           case VK_O:
++           case VK_Q:
++           case VK_R:
++           case VK_S:
++           case VK_T:
++           case VK_U:
++           case VK_V:
++           case VK_W:
++           case VK_Z:
++             private_shift_state &= ~SHIFTSTATE_CTRL; /* This blocks the Ctrl modifier so we send ^K instead of ^YK */
++             goto foxctrlmodifier;
++           /*case VK_TAB: */ /* I can't find a way to get Shift+Tab & Shift+Ctrl+Tab to come out of Fox. They come out as ^I. Though kcbt is defined, it doesn't generate a separate backtab. Besides, a fancy Tab could interfere with other programs. */
++           case VK_ESCAPE: /* Windows won't allow us to get Ctrl+[Shift+]ESC. You can test this with ^Pesc^P and ^P^Yesc^P */
++             goto foxctrlmodifier;
++           case VK_OEM_6: if (shift_state==SHIFTSTATE_CTRL) break; /* [Do not alter od -tascreen refresh ^]. */
++           case VK_OEM_4: private_shift_state &= ~SHIFTSTATE_SHIFT; /* fall through, Oddly enough these keys permit Shift+Ctrl+[ and Shift+Ctrl+]. this will make them unshifted like nearby keys */
++           case VK_OEM_PLUS:
++           case VK_OEM_COMMA:
++           case VK_OEM_MINUS: /* This has the option of Shift+Ctrl+Hyphen but I prefer Ctrl+Underline */
++           case VK_OEM_PERIOD:
++           case VK_OEM_1:
++           case VK_OEM_2: /* This group allows Ctrl & Ctrl+Shift, sends the key shifted or unshifted as necessary, and might send the Ctrl Modifer : or ^Y: */
++           case VK_OEM_3:
++           case VK_OEM_5:
++           case VK_OEM_8: /* I have no idea what this key is so I'll hope that ToAsciiEx() figures it out. */
++           case VK_OEM_7: 
++             private_shift_state &= ~SHIFTSTATE_SHIFT; 
++             goto foxctrlmodifier;
++           case VK_RETURN:
++           case VK_SPACE:
++           case VK_H:
++           case VK_I: /* The Shift-F10 macro recorder can't tell the difference between TAB and ^I. The MODIFY STRUCTURE dialog can. Tab, Shift Tab, and ^I all work. */
++           /*case VK_J: ^YJ turns into Ctrl-Space Bar, check with Shift-F10. ^J doesn't work as a macro key in DOS either. */
++           case VK_M:
++             {
++               WORD keys[3];
++               BYTE ctrlsave;
++ foxctrlmodifier:
++               ctrlsave=keystate[VK_CONTROL];
++               if (private_shift_state&SHIFTSTATE_CTRL) { /* some control keys go as their control selves */
++                 keystate[VK_CONTROL]=0;
++               }
++               r = ToAsciiEx(wParam, scan, keystate, keys, 0, kbd_layout); /* no point in ToUnicodeEx for Foxpro unless someone wants to make up a translation with Fox ` */
++               keystate[VK_CONTROL]=ctrlsave;
++               if (r==1) {
++                 xkey = (BYTE)(keys[0] & 0xFF);
++                 if (private_shift_state&SHIFTSTATE_SHIFT) *p++='\x10'; 
++                 if (private_shift_state&SHIFTSTATE_CTRL) *p++='\x19'; 
++                 *p++=xkey;
++                 if (private_shift_state&SHIFTSTATE_SHIFT) *p++='\x10'; 
++                 *p='\0'; 
++                 return p-output;
++               }
++             }
++           }
++         }
++       }
++       if (shift_state == SHIFTSTATE_CTRL) { 
++         if (wParam >= '2' && wParam <= '8') {/* Control-2 to Control-8 are special */
++           *p++ = "\000\033\034\035\036\037\177"[wParam - '2'];
++           return p - output;
++         }
++       }
++     } /* !left_alt */
+  
+!     /* This will handle function, keypad, and arrows. A META key hasn't been implemented because the interaction with the possible keys we might select is too complicated */
+!     pn=format_keypad(p, wParam, funky_type, shift_state|left_alt|0 ); // Returns NULL if a key couldn't be found
+!     if (pn) return pn-output;
+!     
+!     if (left_alt) *p++ = '\033'; /* prefix with escape keys and characters without wrecking our keypad keys */
+  	/*
+  	 * Finally, deal with Return ourselves. (Win95 seems to
+***************
+*** 4701,4704 ****
+--- 4930,4939 ----
+  		    }
+  		} else {
++ 		    if (left_alt) 
++ 		      switch(wch) { /* Keyboard start code cannot be sent as Alt codes */
++ 		      case '[': /* CSI */
++ 		      case 'O': /* SS3 */
++ 		        return 0;
++ 		    }
+  		    if(capsOn && wch < 0x80) {
+  			WCHAR cbuf[2];
+***************
+*** 4746,4749 ****
+--- 4981,5264 ----
+  }
+  
++ /*
++    * for integer decimal nn.)
++    *
++    * We also deal with the weird ones here. Linux VCs replace F1
++    * to F5 by ESC [ [ A to ESC [ [ E. rxvt doesn't do _that_, but
++    * does replace Home and End (1~ and 4~) by ESC [ H and ESC O w
++    * respectively.
++    * https://github.com/troydm/putty-modified/blob/master/0001-modified-r2.patch
++    */
++ 
++ /* Steps:
++  * 1. Separate function/keypad code out. This allows keyboard emulation output to be 
++  *    written as a chart in a file so all emulations can be checked at once. 
++  *    No need to check key press every emulation. Keys and shift states not present can be checked. 
++  *    Charts can be saved at important points and can be compared with diff tools 
++  *    to ensure that code changes don't unintentionally change output not being worked on.
++  * 2. Reorder and clean up the code to make Foxpro Unix and Xterm New possible. Reordering should
++  *    should not induce any changes.
++  * 3. Clean existing emulations as necessary, mainly eliminating output for unsupported shift states.
++  *    ST must have verified with keypresses and didn't use charts. As a results the original code 
++  *    produced correct output the tested shift states and whatever for unsupported shift states. 
++  *    Sometimes the result was from a less shifted key and sometimes from another emulation
++  *    I eliminated all unsupported shift states because it makes shift states look supported 
++  *    when they are not. No shift states were added to existing emulations because terminfo
++  *    wouldn't support them anyways and I'd like to discourage the other keyboard emulations.
++  * 4. Add XTerm New. Finally, 16 shift states for function and movement keys so we can have
++  *    good keys in Midnight Commander.
++  * 5. Add Foxpro Unix, same as XTerm New with special modifications.
++  * 6. Make Foxpro keyboard an escape code so it doesn't interfere with other applications.
++  * 7. Apply Foxpro keyboard to all keyboard emulations.
++  */
++ /* xterm key modifiers for movement and function keys. http://invisible-island.net/xterm/ctlseqs/ctlseqs.html (SunKeyboard)
++  * 2 Shift (bit 1)
++  * 3 Alt (bit 2)
++  * 4 Shift + Alt
++  * 5 Control
++  * 6 Control + Shift
++  * 7 Control + Alt
++  * 8 Control + Shift + Alt
++  * 9-16 Meta + above sequence */
++ #define PRIVATESHIFTSTATE_META (8)
++ #define PRIVATESHIFTSTATE_CTRL (4) /* These bits are set in an order that allows us to use it as a number into the above table */
++ #define PRIVATESHIFTSTATE_ALT (2)
++ #define PRIVATESHIFTSTATE_SHIFT (1)
++ static unsigned char *format_keypad(unsigned char *p, WPARAM wParam, int funky_type1, int shift_state) { // Returns NULL if a key couldn't be found
++ 	int private_shift_state;
++   int funky_type=funky_type1;
++ 	int funky_Foxpro=term->funky_Foxpro;
++ 	char xkey;
++ 	unsigned code;
++ 	const char *foxbegincode="",*foxendcode="";
++   switch (wParam) { /* do not set foxbegincode or foxendcode here in the switch */
++   case VK_HOME:   code = 1; break; /* H for XTerm new */
++   case VK_INSERT: code = 2; break; /* 2 */
++   case VK_DELETE: code = 3; break; /* 3 */
++   case VK_END:    code = 4; break; /* F */
++   case VK_PRIOR:  code = 5; break; /* 5 */
++   case VK_NEXT:   code = 6; break; /* 6 */
++   default:        code = 0; break;
++   }
++   if (code) {
++     if (funky_Foxpro && shift_state) { /* All keys without shiftstates work */
++       if ((shift_state&(SHIFTSTATE_ALT|SHIFTSTATE_META)) != 0) return NULL; /* No known way to get ALT keypad keys to work and no known use for Alt+These keys */
++       if (1) { // funky_type != FUNKY_XTERMNEW || !(shift_state==SHIFTSTATE_SHIFT && (code==1 || code==4))) { /* 1,4 Shift+Home,End work unmodified from termcap */
++         if (shift_state&SHIFTSTATE_CTRL) {
++ /* Foxpro Control Modifier \x19 ^Y turns itself off */
++ /* Foxpro Shift Modifier \x10 ^P must be turned off manually */
++           foxbegincode="\x19";
++           foxendcode="";
++         } /* Note: while many of these keys have no valid function, they can all be sent and used by Shift-F10 macro recorder */
++         if (shift_state&SHIFTSTATE_SHIFT) {
++           foxbegincode=(shift_state&SHIFTSTATE_CTRL)?"\x10\x19":"\x10";
++           foxendcode="\x10";
++         }
++         shift_state=0;
++       }
++     }
++     if (funky_type == FUNKY_XTERMNEW) { /* XTERMNEW termcap codes not done: kind,kri because I don't know what they are. */
++       private_shift_state=(shift_state&(PRIVATESHIFTSTATE_SHIFT|PRIVATESHIFTSTATE_META)) /* these two bits are positioned correctly. The next two bits get swapped */
++       | ((shift_state&SHIFTSTATE_CTRL)?PRIVATESHIFTSTATE_CTRL:0) | ((shift_state&SHIFTSTATE_ALT)?PRIVATESHIFTSTATE_ALT:0); /* swap ctrl and alt so we can use this as a number */
++       if (shift_state) {
++         if (code == 1 || code == 4) return p+sprintf((char *) p, "%s\x1B[1;%u%c%s",foxbegincode,private_shift_state+1,"xHyzF"[code],foxendcode); /* xyz=unused but obvious if we screw up and display it */
++         else return p+sprintf((char *) p, "%s\x1B[%u;%u~%s",foxbegincode,code,private_shift_state+1,foxendcode );
++       } else if (shift_state==0) {
++         if (code==1 || code==4) return p+sprintf((char *) p, "%s\x1BO%c%s",foxbegincode,"xHyzF"[code],foxendcode);
++       }
++     }
++     //if ((shift_state&(SHIFTSTATE_CTRL|SHIFTSTATE_ALT|SHIFTSTATE_META)) != 0) return NULL;
++     if (shift_state) return NULL;
++     if (funky_type == FUNKY_VT400) code = "\0\2\1\4\5\3\6"[code]; /* Reorder edit keys to physical order */
++ 
++     if (term->vt52_mode) {
++       return p + sprintf((char *) p, "%s\x1B%c%s", foxbegincode, " HLMEIG"[code], foxendcode);
++     }
++     if (funky_type == FUNKY_SCO) {/* SCO small keypad */
++       char codes[] = "HL.FIG";
++       if (wParam == VK_DELETE) {
++         p += sprintf((char *) p, "%s\x7F%s", foxbegincode,foxendcode);
++       } else {
++         p += sprintf((char *) p, "%s\x1B[%c%s", foxbegincode,codes[code-1],foxendcode);
++       }
++       return p;
++     }
++     if ((code == 1 || code == 4) &&
++       conf_get_int(conf, CONF_rxvt_homeend)) {
++       p += sprintf((char *) p, code == 1 ? "%s\x1B[H%s" : "%s\x1BOw%s", foxbegincode,foxendcode);
++       return p;
++     }
++     return p + sprintf((char *) p, "%s\x1B[%d~%s",foxbegincode, code, foxendcode);
++   }
++   if (wParam>=VK_F1 && wParam<=VK_F20) { /* sections are ordered from most function to least functional */
++     private_shift_state=(shift_state&(PRIVATESHIFTSTATE_SHIFT|PRIVATESHIFTSTATE_META)) /* these two bits are positioned correctly. The next two bits get swapped */
++         | ((shift_state&SHIFTSTATE_CTRL)?PRIVATESHIFTSTATE_CTRL:0) | ((shift_state&SHIFTSTATE_ALT)?PRIVATESHIFTSTATE_ALT:0); /* swap ctrl and alt so we can use this as a number */
++     if (funky_Foxpro) {
++       if (private_shift_state&PRIVATESHIFTSTATE_META) return NULL;
++       if (private_shift_state&PRIVATESHIFTSTATE_ALT) return NULL; /* No good solution here */
++       if (wParam>=VK_F13 && private_shift_state) return NULL;
++       if (wParam == VK_F11 || wParam== VK_F12) { /* Swap codes between 100/400/rest to allow F11 & F12 to work independantly from Shift-F1 and Shift-F2 */
++         if (funky_type == FUNKY_VT100P) funky_type=FUNKY_VT400; /* This would interfere with VK_HOME... processing but it's already done */
++         else if (funky_type <= FUNKY_VT400) funky_type=FUNKY_VT100P;
++       }
++       if (private_shift_state==(PRIVATESHIFTSTATE_CTRL|PRIVATESHIFTSTATE_SHIFT) ) { /* Fox claims to support Shift+Ctrl function keys termcap kf37-kf46 but it doesn't */
++         foxbegincode="\x10\x19";
++         foxendcode="\x10";
++         private_shift_state &= ~(PRIVATESHIFTSTATE_CTRL|PRIVATESHIFTSTATE_SHIFT);
++         shift_state &= ~(SHIFTSTATE_CTRL|SHIFTSTATE_SHIFT);
++       } else if (private_shift_state==(PRIVATESHIFTSTATE_CTRL) && funky_type != FUNKY_XTERMNEW && funky_type != FUNKY_SCO) {
++         foxbegincode="\x19";
++         foxendcode="";
++         private_shift_state &= ~(PRIVATESHIFTSTATE_CTRL);
++         shift_state &= ~(SHIFTSTATE_CTRL);
++         goto fkeyanyways;
++       } else if (wParam >= VK_F11 && private_shift_state==(PRIVATESHIFTSTATE_SHIFT) && (funky_type != FUNKY_SCO && funky_type!=FUNKY_XTERMNEW) ) { /* Though the sFN keys are defined they are not found in most termcap or terminfo */
++         foxbegincode="\x10";
++         foxendcode="\x10";
++         private_shift_state &= ~(PRIVATESHIFTSTATE_SHIFT);
++         shift_state &= ~(PRIVATESHIFTSTATE_SHIFT);
++         //goto fkeyanyways;
++       }
++     }
++     if (funky_type == FUNKY_XTERMNEW) { /* Adding XTERMNEW looks easy but major rearranging was necessary to make it easy */ 
++       xkey='~';
++       switch (wParam) { /* http://invisible-island.net/xterm/ctlseqs/ctlseqs.html && infocmp -1 xterm */
++       case VK_F1: code = 1; xkey='P'; break;
++       case VK_F2: code = 1; xkey='Q'; break;
++       case VK_F3: code = 1; xkey='R';  break;
++       case VK_F4: code = 1; xkey='S';  break;
++       case VK_F5: code = 15; break;
++       case VK_F6: code = 17; break;
++       case VK_F7: code = 18; break;
++       case VK_F8: code = 19; break;
++       case VK_F9: code = 20; break;
++       case VK_F10: code = 21; break;
++       case VK_F11: code = 23; break;
++       case VK_F12: code = 24; break;/* F13-F20 not found on a normal PC keyboard */
++       case VK_F13: code = 1; xkey='P'; private_shift_state|=PRIVATESHIFTSTATE_SHIFT; break;
++       case VK_F14: code = 1; xkey='Q'; private_shift_state|=PRIVATESHIFTSTATE_SHIFT; break;
++       case VK_F15: code = 1; xkey='R'; private_shift_state|=PRIVATESHIFTSTATE_SHIFT; break;
++       case VK_F16: code = 1; xkey='S'; private_shift_state|=PRIVATESHIFTSTATE_SHIFT; break;
++       case VK_F17: code = 15; private_shift_state|=PRIVATESHIFTSTATE_SHIFT; break;
++       case VK_F18: code = 17; private_shift_state|=PRIVATESHIFTSTATE_SHIFT; break;
++       case VK_F19: code = 18; private_shift_state|=PRIVATESHIFTSTATE_SHIFT; break;
++       case VK_F20: code = 19; private_shift_state|=PRIVATESHIFTSTATE_SHIFT; break;
++       }
++       if (wParam>VK_F12 && ((shift_state&SHIFTSTATE_SHIFT) != 0 || (shift_state&(SHIFTSTATE_CTRL|SHIFTSTATE_ALT|SHIFTSTATE_META))) ) return NULL; /* We use shift_state because private_shift_state may have had a bit removed. */
++       if (0!=(private_shift_state&(PRIVATESHIFTSTATE_SHIFT|PRIVATESHIFTSTATE_CTRL|PRIVATESHIFTSTATE_ALT|PRIVATESHIFTSTATE_META))) {/* This code is meta ready when someone decides what key to use */
++         return p + sprintf((char *) p, "%s\x1B[%u;%u%c%s",foxbegincode,code,private_shift_state+1,xkey,foxendcode); 
++       } else if (wParam<=VK_F4) {
++         return p + sprintf((char *) p, "%s\x1BO%c%s",foxbegincode,xkey,foxendcode );
++       } else {
++         return p + sprintf((char *) p, "%s\x1B[%u%c%s",foxbegincode,code,xkey,foxendcode);
++       }
++     }
++     if ((shift_state&(SHIFTSTATE_ALT|SHIFTSTATE_META)) != 0) return NULL; /* Emulations below this line never return results with this modifier on a function key */
++     if (funky_type == FUNKY_SCO) {
++       code = wParam - VK_F1;
++       if (wParam>VK_F12 || (shift_state&(SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL)) != shift_state) return NULL;
++       if (shift_state&SHIFTSTATE_SHIFT) code += 12;
++       if (shift_state&SHIFTSTATE_CTRL) code += 24; /* both: +36 */
++       return p + sprintf((char *) p, "%s\x1B[%c%s", foxbegincode, "MNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz@[\\]^_`{"[code],foxendcode);
++     }
++     if ((shift_state&SHIFTSTATE_CTRL) != 0) return NULL;
++ fkeyanyways:
++     switch (wParam) {
++     case VK_F1: code = (((shift_state&(SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL))==SHIFTSTATE_SHIFT) ? 23 : 11); break;
++     case VK_F2: code = (((shift_state&(SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL))==SHIFTSTATE_SHIFT) ? 24 : 12); break;
++     case VK_F3: code = (((shift_state&(SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL))==SHIFTSTATE_SHIFT) ? 25 : 13); break;
++     case VK_F4: code = (((shift_state&(SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL))==SHIFTSTATE_SHIFT) ? 26 : 14); break;
++     case VK_F5: code = (((shift_state&(SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL))==SHIFTSTATE_SHIFT) ? 28 : 15); break;
++     case VK_F6: code = (((shift_state&(SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL))==SHIFTSTATE_SHIFT) ? 29 : 17); break;
++     case VK_F7: code = (((shift_state&(SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL))==SHIFTSTATE_SHIFT) ? 31 : 18); break;
++     case VK_F8: code = (((shift_state&(SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL))==SHIFTSTATE_SHIFT) ? 32 : 19); break;
++     case VK_F9: code = (((shift_state&(SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL))==SHIFTSTATE_SHIFT) ? 33 : 20); break;
++     case VK_F10: code = (((shift_state&(SHIFTSTATE_SHIFT|SHIFTSTATE_CTRL))==SHIFTSTATE_SHIFT) ? 34 : 21); break;
++     case VK_F11: code = 23; break;
++     case VK_F12: code = 24; break;
++     case VK_F13: code = 25; break; /* F13-F20 not found on a normal PC keyboard */
++     case VK_F14: code = 26; break;
++     case VK_F15: code = 28; break;
++     case VK_F16: code = 29; break;
++     case VK_F17: code = 31; break;
++     case VK_F18: code = 32; break;
++     case VK_F19: code = 33; break;
++     case VK_F20: code = 34; break;
++     }
++     if ((shift_state&SHIFTSTATE_SHIFT) != 0 && wParam>VK_F10) return NULL;
++     if ((term->vt52_mode || funky_type == FUNKY_VT100P) /*&& code >= 11*/ && code <= 24) {
++       int offt = 0;
++       if (code > 21) offt=2;
++       else if (code > 15) offt=1;
++       if (term->vt52_mode) p += sprintf((char *) p, "%s\x1B%c%s", foxbegincode, code + 'P' - 11 - offt, foxendcode);
++       else p += sprintf((char *) p, "%s\x1BO%c%s", foxbegincode, code + 'P' - 11 - offt, foxendcode);
++       return p;
++     }
++     if (funky_type == FUNKY_LINUX /*&& code >= 11*/ && code <= 15) { /* F1-F5 */
++       return p + sprintf((char *) p, "%s\x1B[[%c%s", foxbegincode, code + 'A' - 11, foxendcode);
++     }
++     if (funky_type == FUNKY_XTERM /*&& code >= 11*/ && code <= 14) { /* F1-F4 */
++       if (term->vt52_mode) p += sprintf((char *) p, "%s\x1B%c%s", foxbegincode, code + 'P' - 11, foxendcode);
++       else p += sprintf((char *) p, "%s\x1BO%c%s", foxbegincode, code + 'P' - 11, foxendcode);
++       return p;
++     }
++     return p + sprintf((char *) p, "%s\x1B[%d~%s", foxbegincode, code, foxendcode);
++   }
++ 
++   /*
++    * Now the remaining keys (arrows and Keypad 5. Keypad 5 for
++    * some reason seems to send VK_CLEAR to Windows...).
++    */
++   switch (wParam) {
++   case VK_UP:    xkey = 'A'; break;
++   case VK_DOWN:  xkey = 'B'; break;
++   case VK_RIGHT: xkey = 'C'; break;
++   case VK_LEFT:  xkey = 'D'; break;
++   case VK_CLEAR: xkey = 'E'; if (funky_Foxpro) return NULL; else break; /* Note to SGT: G is the wrong code. It's E here. Check KP5 on xterm and XfceTerm. Check infocmp xterm kb2= */
++   default:       xkey = '\0';break;
++   }
++   if (xkey != '\0') {
++     funky_type=funky_type1; /* Not necessary but it should be clear what we've mangled in the FN key section */
++     if (shift_state) {
++       if (funky_Foxpro) {
++         if ((shift_state&(SHIFTSTATE_ALT|SHIFTSTATE_META)) != 0) return NULL;
++ #if 0
++         if ((xkey=='C' || xkey=='D') && shift_state==SHIFTSTATE_CTRL)  { /* For right,left; Shift and Shift+Control Work */
++           goto arrowsanyways;
++         } else
++         if (funky_type != FUNKY_XTERMNEW || xkey<='B')  
++ #endif /* Saving these 4 keys isn't worth it, particularly when two of them are defined wrong by Foxpro */
++         {
++           if (shift_state&SHIFTSTATE_CTRL) {
++             foxbegincode="\x19";
++             foxendcode="";
++           } /* Note: while many of these keys have no valid function, they can all be sent and used by Shift-F10 macro recorder */
++           if (shift_state&SHIFTSTATE_SHIFT) {
++             foxbegincode=(shift_state&SHIFTSTATE_CTRL)?"\x10\x19":"\x10";
++             foxendcode="\x10";
++           }
++           shift_state=0;
++           goto arrowsanyways;
++         }
++       }
++       if (funky_type == FUNKY_XTERMNEW) { /* in XTERMNEW only the 4 unshifted arrows are original. All arrow keys with shift states have custom codes. */
++         private_shift_state=(shift_state&(PRIVATESHIFTSTATE_SHIFT|PRIVATESHIFTSTATE_META)) /* these two bits are positioned correctly. The next two bits get swapped */
++           | ((shift_state&SHIFTSTATE_CTRL)?PRIVATESHIFTSTATE_CTRL:0) | ((shift_state&SHIFTSTATE_ALT)?PRIVATESHIFTSTATE_ALT:0); /* swap ctrl and alt so we can use this as a number */
++         return p+sprintf((char *) p, "%s\x1B[1;%u%c%s", foxbegincode,private_shift_state+1,xkey,foxendcode);
++       }
++     }
++     if (shift_state==0 || shift_state==SHIFTSTATE_CTRL) {
++       char arrowbuf[32];
++       int ct;
++ arrowsanyways:
++       ct=format_arrow_key(arrowbuf, term, xkey, shift_state); /* No wonder Shift or Alt + Ctrl Arrows didn't work... */
++       if (ct>0) {
++         return p + sprintf((char *) p, "%s%s%s", foxbegincode,arrowbuf,foxendcode);
++       }
++     }
++   }
++   return NULL;
++ }
++ 
+  void set_title(void *frontend, char *title)
+  {
+***************
+*** 5636,5640 ****
+   * See if we're in full-screen mode.
+   */
+! static int is_full_screen()
+  {
+      if (!IsZoomed(hwnd))
+--- 6151,6155 ----
+   * See if we're in full-screen mode.
+   */
+! static int is_full_screen(void)
+  {
+      if (!IsZoomed(hwnd))
+***************
+*** 5675,5679 ****
+   * maximised.
+   */
+! static void make_full_screen()
+  {
+      DWORD style;
+--- 6190,6194 ----
+   * maximised.
+   */
+! static void make_full_screen(void)
+  {
+      DWORD style;
+***************
+*** 5716,5720 ****
+   * Clear the full-screen attributes.
+   */
+! static void clear_full_screen()
+  {
+      DWORD oldstyle, style;
+--- 6231,6235 ----
+   * Clear the full-screen attributes.
+   */
+! static void clear_full_screen(void)
+  {
+      DWORD oldstyle, style;
+***************
+*** 5749,5753 ****
+   * Toggle full-screen mode.
+   */
+! static void flip_full_screen()
+  {
+      if (is_full_screen()) {
+--- 6264,6268 ----
+   * Toggle full-screen mode.
+   */
+! static void flip_full_screen(void)
+  {
+      if (is_full_screen()) {
+diff -r -C2 windows/winstore.c.orig windows/winstore.c
+*** windows/winstore.c.orig	Mon Jul 22 03:11:58 2013
+--- windows/winstore.c	Sat Jun 21 02:22:38 2014
+***************
+*** 29,32 ****
+--- 29,378 ----
+  		      (HWND, int, HANDLE, DWORD, LPSTR));
+  
++ #define REG_EITHER_STRING (0x4181)
++ /* any size result will be returned
++  * returns of type REG_SZ or REG_EXPAND_SZ are of type TCHAR
++  */
++ static LPBYTE strdupRegQueryValueEx(LONG *pret,HKEY hKey,LPCSTR Key,DWORD dwValType,DWORD *pcbBufLen)
++ {
++   LPBYTE Result=NULL;
++   BYTE szValue[256]; /* This will let us get the short ones in 1 try */
++   DWORD dwMyValType=0,cbBufLen=sizeof(szValue);
++   LONG ret=RegQueryValueEx(hKey, Key, NULL, &dwMyValType, szValue, &cbBufLen);
++   if (ret == ERROR_SUCCESS) {
++     if ((dwValType == dwMyValType) || ((dwValType==REG_EITHER_STRING) && ((dwMyValType==REG_SZ) || (dwMyValType==REG_EXPAND_SZ))) ) {
++       Result=(LPBYTE)snewn(cbBufLen,char);
++       memcpy(Result,szValue,cbBufLen);
++     }
++   } else if (ret == ERROR_MORE_DATA) {
++     if ((dwValType == dwMyValType) || ((dwValType==REG_EITHER_STRING) && ((dwMyValType==REG_SZ) || (dwMyValType==REG_EXPAND_SZ))) ) {
++       Result=(LPBYTE)snewn(cbBufLen,char);
++       ret=RegQueryValueEx(hKey, Key, NULL, &dwMyValType, Result, &cbBufLen);
++       if (ret != ERROR_SUCCESS) {
++         sfree(Result);
++         Result=NULL;
++       }
++     }
++   }
++   if (pret) *pret=ret;
++   if (pcbBufLen) *pcbBufLen=Result?cbBufLen:0;
++   return Result;
++ }
++ 
++ /* How to pick a special number that won't ever be a handle?
++  * 0 is taken as NULL, handles are likely to be DWORD aligned so &1,&2,&3 won't ever be valid handles */
++ #define SESSKEY_ASFILE ((HANDLE)1) /* comment this out to disable Portable Putty INI */
++ #ifndef SESSKEY_ASFILE
++ #define setiniinfo(u) (NULL)
++ #else
++ static char g_szIniFile[MAX_PATH];
++ static char g_szSessionName[256];
++ #define SESSION_LEADCHAR ('^')
++ #define SSHHOSTKEY_LEADCHAR ('$')
++ #define WRITEBYSECTION /* Comment this out to eliminate section writes */
++ #ifdef WRITEBYSECTION
++ struct ARMString {
++   char *szzSections;
++   size_t cchSections; /* Characters currently used in sszSections (not counting the extra \0) */
++   size_t cbSections;  /* Allocated size of sszSections */
++ } g_aSection={0};
++ 
++ /* Windows 95 is limited to 32,767 characters */
++ /* cchSectionData does not include the trailing \0 byte */
++ static LPBYTE strdupGetPrivateProfileSection(LPCSTR szApp,LPCSTR szIni,size_t *cchSectionData,size_t *cbSection)
++ {
++   LPTSTR Result=NULL;
++   char szBuf[4096];
++   size_t cchBuf=lenof(szBuf),cbBuf=0;
++   szBuf[0]='\0'; szBuf[1]='\0';
++   DWORD cchLen=GetPrivateProfileSection(szApp, szBuf, cchBuf, szIni); /* cchLen includes the \0 after the last string but does not include the trailing \0 */
++   if (cchLen < cchBuf-2) {
++     cbBuf = (cchLen+1)*sizeof(szBuf[0]);
++     Result=(LPBYTE)snewn(cbBuf,char);
++     memset(Result,0x90,cbBuf);
++     memcpy(Result,szBuf,cbBuf); /* Don't forget the trailing \0\0 */
++   } else while (cchLen >= cchBuf-2) {
++     cchBuf *= 2;  /* no smart way to get the buffer size on the first try so we just keep doubling until we get it all */
++     if (Result) sfree(Result);
++     cbBuf=cchBuf*sizeof(szBuf[0]);
++     Result=snewn(cbBuf, char);
++     cchLen=GetPrivateProfileSection(szApp, Result, cbBuf, szIni);
++   }
++   *cchSectionData=cchLen;
++   *cbSection=cbBuf;
++   return Result;
++ }
++ 
++ /* 0==strcmpequals("Key=","Key"); The strings are only considered equal when the first string ends in an = */
++ static int stricmpequals(const char *szStEquals,const char *szSt) {
++   while(*szStEquals != '\0' && *szSt != '\0' && tolower(*szStEquals) == tolower(*szSt)) { szStEquals++; szSt++; }
++   if (*szStEquals == '=' && *szSt=='\0') return 0;
++   return -1;
++ }
++ /* Writing values one by one took 20 seconds for 25 PuTTY connections. That's too long 
++  * and too abusive to flash drives which is where 99% of all portable PuTTY installations
++  * are going so I wrote this. It imports all 25 sessions in less than a second. This is also better because
++  * this way doesn't steadily reorder the file. The new sections are inserted where the
++  * old sections were. Saving settings will also be faster and less destructive to flash drives. */
++ /* We always put \0\0 on the end so that this is ready to be WritePrivateProfileSection at any time */
++ /* bUpdate=0, add only, do not check for existing values */
++ /* bUpdate=1, add new or update existing value as necessary */
++ static BOOL WritePrivateProfileStringSection(const char *szKey,const char *szValue,struct ARMString *aSections,int bUpdate) {
++   size_t cbMore;
++   char *szzSections=aSections->szzSections;
++   size_t cchSections=aSections->cchSections,cbSections=aSections->cbSections;
++   char *szSectionKey="";
++   if (szzSections && bUpdate) for(szSectionKey=szzSections; *szSectionKey; szSectionKey += strlen(szSectionKey)+1) {
++     if (0==stricmpequals(szSectionKey,szKey)) break;
++   }
++   if (*szSectionKey) { /* Update */
++     size_t cbOld=(strlen(szSectionKey)+1)*sizeof(*szSectionKey);
++     size_t cbNew=szValue?((strlen(szKey)+1+strlen(szValue)+1)*sizeof(*szValue)):0;
++     if (cbNew>cbOld) { /* Expand */
++       cbMore = cbNew - cbOld;
++       if (cbSections < (cchSections+1)*sizeof(*szzSections)+cbMore) {
++         char *szzSectionsOld;
++         if ((cbSections  & (cbSections-1))) cbSections=1; /* Force a power of two */
++         if (cbSections<8192) cbSections=8192; /* Each full size PuTTY Session is about 4500 bytes so larger should eliminate almost all reallocs() */
++         while(cbSections<(cchSections+1)*sizeof(*szzSections)+cbMore) cbSections *= 2;
++         szzSections = srealloc(szzSectionsOld=szzSections,cbSections);
++         szSectionKey += (szzSections-szzSectionsOld); /* Maybe realloc() moved our string */
++       }
++       memmove((char *)szSectionKey+cbMore,szSectionKey,(cchSections-(szSectionKey-szzSections)+1)*sizeof(*szSectionKey));
++       cchSections+=cbMore/sizeof(*szSectionKey);
++     } else if (cbNew<cbOld) { /* Contract */
++ #define cbLess cbMore
++       cbLess = cbOld - cbNew;
++       memmove(szSectionKey,(char *)szSectionKey+cbLess,(cchSections-(szSectionKey-szzSections)+1)*sizeof(*szSectionKey)-cbLess);
++       cchSections -= cbLess/sizeof(*szSectionKey);
++ #undef cbLess
++     }
++     if (szValue) sprintf(szSectionKey,"%s=%s",szKey,szValue);
++   } else { /* Add */
++     if (szValue) {
++       cbMore=(strlen(szKey)+1+strlen(szValue)+1)*sizeof(*szKey); /* Key=Value\0\0 */
++       if (!szzSections) {
++         cchSections=0;
++         cbSections=0; 
++       }
++       if (!szzSections || cbSections < (cchSections+1)*sizeof(*szzSections)+cbMore) {
++         if ((cbSections  & (cbSections-1))) cbSections=1; /* Force a power of two */
++         if (cbSections<8192) cbSections=8192; /* Each full size PuTTY Session is about 4500 bytes so larger should eliminate almost all reallocs() */
++         while(cbSections<(cchSections+1)*sizeof(*szzSections)+cbMore) cbSections *= 2;
++         szzSections = srealloc(szzSections,cbSections);
++       }
++       cchSections+=sprintf(szzSections+cchSections,"%s=%s%c",szKey,szValue,'\0');
++     }
++   }
++   aSections->szzSections=szzSections;
++   aSections->cchSections=cchSections;
++   aSections->cbSections=cbSections;
++   return 1;
++ }
++ 
++ static int __cdecl fcmp(const void *vp,const void *vq) {
++   const char **p=(const char **)vp;
++   const char **q=(const char **)vq;
++   return strcmp(*p,*q);
++ }
++ 
++ static void SortPrivateProfileSection(char *szzStrings) {
++   size_t num;
++   char *p;
++   for(p=szzStrings,num=0; *p; p+=strlen(p)+1, num++);
++   if (num>1) {
++     char **szStrings=smalloc(num*sizeof(*szStrings));
++     char *szzNewStrings=smalloc((p-szzStrings+1)*sizeof(*szzNewStrings));
++     char *q;
++     size_t num2;
++     for(p=szzStrings,num=0; *p; p+=strlen(p)+1, num++) szStrings[num]=p;
++     qsort(szStrings,num,sizeof(*szStrings),fcmp);
++     for(q=szzNewStrings,num2=num,num=0; num<num2; num++) {
++       size_t cbString=strlen(szStrings[num])+1;
++       memcpy(q,szStrings[num],cbString);
++       q+=cbString;
++     }
++     *q++='\0';
++     memcpy(szzStrings,szzNewStrings,p-szzStrings+1);
++     sfree(szStrings);
++     sfree(szzNewStrings);
++   }
++ }
++ #endif
++ 
++ static LPBYTE strdupGetPrivateProfileString(LPCSTR szApp,LPCSTR Key,LPCSTR szIni)
++ {
++   LPTSTR Result=NULL;
++   char szBuf[8192];
++   size_t cchBuf=lenof(szBuf);
++   DWORD cchLen=GetPrivateProfileString(szApp, Key, "\x01", szBuf, cchBuf, szIni); /* cchLen does not include the trailing nul byte */
++   if (cchLen != 1 || szBuf[0]!='\x01') {
++     if (cchLen < cchBuf-1) {
++       Result=(LPBYTE)snewn((cchLen+1)*sizeof(szBuf[0]),char);
++       memcpy(Result,szBuf,(cchLen+1)*sizeof(szBuf[0])); /* Don't forget the trailing \0 */
++     } else while (cchLen >= cchBuf-1) {
++       cchBuf *= 2; /* no smart way to get the buffer size on the first try so we just keep doubling until we get it all */
++       if (Result) sfree(Result);
++       Result=snewn(cchBuf, char);
++       cchLen=GetPrivateProfileString(szApp, Key, "\x01", Result, cchBuf, szIni);
++     }
++     if (cchLen == 1 && Result[0]=='\x01') {
++       sfree(Result);
++       Result=NULL;
++     }
++   }
++   return Result;
++ }
++ 
++ static HKEY INIOpenFile(void) {
++   DWORD rv=GetModuleFileName(NULL,g_szIniFile,lenof(g_szIniFile)); /* rv includes the \0 for this function */
++   if (rv>5 && rv<lenof(g_szIniFile) && 0!=stricmp(g_szIniFile+rv-4,".INI") ) {
++     strcpy(g_szIniFile+rv-4,".INI");
++     HANDLE h=CreateFile(g_szIniFile,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
++     if (h != INVALID_HANDLE_VALUE) {
++       CloseHandle(h);
++       return SESSKEY_ASFILE;
++     }
++   }
++   return 0;
++ }
++ 
++ static HKEY setiniinfo(const char *sessionname) {
++   HKEY key=INIOpenFile();
++   if (key) {
++     if (!sessionname) {
++       g_szSessionName[0]='\0';
++     } else {
++       g_szSessionName[0]=SESSION_LEADCHAR;
++       strncpy(g_szSessionName+1,sessionname,sizeof(g_szSessionName)-1); g_szSessionName[sizeof(g_szSessionName)-1]='\0';
++     }
++   }
++   return key;
++ }
++ 
++ static void CopyRegToINIValues(HKEY hKey2, const char *szINISection,const char *szIniFile) {
++   DWORD dwIndex2;
++   char szValue[MAX_PATH+1],szData[256];
++ #ifdef WRITEBYSECTION
++   struct ARMString aSections; aSections.szzSections=NULL;
++ #else
++   WritePrivateProfileString(szINISection,NULL,NULL,szIniFile);
++ #endif
++   for(dwIndex2=0; 1 ; dwIndex2++) {
++     DWORD cbValue=lenof(szValue),cbData=lenof(szData),dwType=0;
++     LONG rv=RegEnumValue(hKey2,dwIndex2,szValue,&cbValue,NULL,&dwType,szData,&cbData);
++     if (rv==ERROR_NO_MORE_ITEMS) break;
++     switch(dwType) {
++     case REG_SZ: {
++         char *p=NULL;
++         if (rv==ERROR_MORE_DATA) {
++           rv=RegEnumValue(hKey2,dwIndex2,szValue,&cbValue,NULL,&dwType,NULL,NULL); /* The clod Windows didn't fill in szValue even though it could have */
++           if (rv==ERROR_SUCCESS) {
++             p=strdupRegQueryValueEx(NULL, hKey2, szValue, dwType, NULL);
++           }
++         }
++         if (rv==ERROR_SUCCESS) {
++ #ifndef WRITEBYSECTION
++           WritePrivateProfileString(szINISection,szValue,p?p:szData,szIniFile);
++ #else
++           WritePrivateProfileStringSection(szValue,p?p:szData,&aSections,0);
++ #endif
++         }
++         if (p) sfree(p);
++       }
++       break;
++     case REG_DWORD: {
++         DWORD *dwData=(DWORD *)szData;
++         char st[16];
++         sprintf(st,"%d",dwData[0]);
++ #ifndef WRITEBYSECTION
++         WritePrivateProfileString(szINISection,szValue,st,szIniFile);
++ #else
++         WritePrivateProfileStringSection(szValue,st,&aSections,0);
++ #endif
++       } 
++       break;
++     }
++   }
++ #ifdef WRITEBYSECTION
++   if (aSections.szzSections) {
++     SortPrivateProfileSection(aSections.szzSections);
++     WritePrivateProfileSection(szINISection,aSections.szzSections,szIniFile);
++     sfree(aSections.szzSections);
++   } else WritePrivateProfileString(szINISection,NULL,NULL,szIniFile);
++ #endif
++ }
++ 
++ static void CopyRegToINI(const char *szIniFile) {
++   HKEY hKey;
++   if (RegOpenKey(HKEY_CURRENT_USER, PUTTY_REG_POS "\\SshHostKeys", &hKey) == ERROR_SUCCESS) {
++     CopyRegToINIValues(hKey,"SshHostKeys",szIniFile);
++     RegCloseKey(hKey);
++   }
++   if (RegOpenKey(HKEY_CURRENT_USER, puttystr, &hKey) == ERROR_SUCCESS) {
++     DWORD dwIndex;
++     char szKey[MAX_PATH+1+1];
++     for(dwIndex=0; RegEnumKey(hKey,dwIndex,szKey+1,lenof(szKey)-1) == ERROR_SUCCESS; dwIndex++) {
++       HKEY hKey2;
++       char puttystr2[256];
++       szKey[0]=SESSION_LEADCHAR;
++       sprintf(puttystr2,"%s\\%s",puttystr,szKey+1);
++       if (RegOpenKey(HKEY_CURRENT_USER, puttystr2, &hKey2) == ERROR_SUCCESS) {
++         CopyRegToINIValues(hKey2,szKey,szIniFile);
++         RegCloseKey(hKey2);
++       }
++     }
++     RegCloseKey(hKey);
++   }
++ }
++ 
++ static void CopyINIToRegValues(HKEY hKey2, const char *szSection,const char *szIniFile) {
++   char *szzKeys=strdupGetPrivateProfileString(szSection,NULL,szIniFile);
++   if (szzKeys) {
++     char *szKey;
++     for(szKey=szzKeys; *szKey; szKey+=strlen(szKey)+1) {
++       char *szValue=strdupGetPrivateProfileString(szSection,szKey,szIniFile);
++       if (szValue) {
++         LONG n=strtol(szValue,NULL,10);
++         char st[16];
++         sprintf(st,"%ld",n);
++         if (0==strcmp(szValue,st)) {
++           DWORD dw=n;
++           RegSetValueEx(hKey2, szKey, 0, REG_DWORD, (CONST BYTE *)&dw, sizeof(dw));
++         } else RegSetValueEx(hKey2, szKey, 0, REG_SZ, szValue, strlen(szValue)+1);
++         sfree(szValue);
++       }
++     }
++     sfree(szzKeys);
++   } 
++ }
++ 
++ static void CopyINIToReg(const char *szIniFile) {
++   HKEY hKey;
++   size_t cbputtystr=strlen(puttystr);
++   if (RegCreateKey(HKEY_CURRENT_USER, PUTTY_REG_POS "\\SshHostKeys", &hKey) == ERROR_SUCCESS) {
++     CopyINIToRegValues(hKey,"SshHostKeys",szIniFile);
++     RegCloseKey(hKey);
++   }
++   if (RegCreateKey(HKEY_CURRENT_USER, puttystr, &hKey) == ERROR_SUCCESS) {
++     char *szzSections=strdupGetPrivateProfileString(NULL,NULL,szIniFile);
++     if (szzSections) {
++       char *szSection;
++       for(szSection=szzSections; *szSection; szSection+=strlen(szSection)+1) if (*szSection==SESSION_LEADCHAR && strlen(szSection)+cbputtystr < MAX_PATH) {
++         HKEY hKey2;
++         char puttystr2[MAX_PATH+1];
++         sprintf(puttystr2,"%s\\%s",puttystr,szSection+1);
++         RegDeleteKey(hKey,szSection+1);
++         if (RegCreateKey(HKEY_CURRENT_USER, puttystr2, &hKey2) == ERROR_SUCCESS) {
++           CopyINIToRegValues(hKey2,szSection,szIniFile);
++           RegCloseKey(hKey2);
++         }
++       }
++       sfree(szzSections);
++     }
++     RegCloseKey(hKey);
++   }
++ }
++ #endif
++ 
+  static void mungestr(const char *in, char *out)
+  {
+***************
+*** 76,84 ****
+  void *open_settings_w(const char *sessionname, char **errmsg)
+  {
+-     HKEY subkey1, sesskey;
+-     int ret;
+      char *p;
+! 
+!     *errmsg = NULL;
+  
+      if (!sessionname || !*sessionname)
+--- 422,427 ----
+  void *open_settings_w(const char *sessionname, char **errmsg)
+  {
+      char *p;
+!     HKEY sesskey;
+  
+      if (!sessionname || !*sessionname)
+***************
+*** 88,91 ****
+--- 431,449 ----
+      mungestr(sessionname, p);
+  
++     *errmsg = NULL;
++ #ifdef SESSKEY_ASFILE
++     sesskey = setiniinfo(p);
++     if (sesskey) {
++ #ifdef WRITEBYSECTION
++ 	g_aSection.szzSections=strdupGetPrivateProfileSection(g_szSessionName,g_szIniFile,&g_aSection.cchSections,&g_aSection.cbSections);
++ #endif
++ 	sfree(p);
++ 	return sesskey;
++     } else 
++ #endif
++     {
++     HKEY subkey1;
++     int ret;
++ 
+      ret = RegCreateKey(HKEY_CURRENT_USER, puttystr, &subkey1);
+      if (ret != ERROR_SUCCESS) {
+***************
+*** 105,119 ****
+      sfree(p);
+      return (void *) sesskey;
+  }
+  
+  void write_setting_s(void *handle, const char *key, const char *value)
+  {
+!     if (handle)
+! 	RegSetValueEx((HKEY) handle, key, 0, REG_SZ, value,
+! 		      1 + strlen(value));
+  }
+  
+  void write_setting_i(void *handle, const char *key, int value)
+  {
+      if (handle)
+  	RegSetValueEx((HKEY) handle, key, 0, REG_DWORD,
+--- 463,503 ----
+      sfree(p);
+      return (void *) sesskey;
++     }
+  }
+  
+  void write_setting_s(void *handle, const char *key, const char *value)
+  {
+! #ifdef SESSKEY_ASFILE
+!     if (handle==SESSKEY_ASFILE) {
+! #ifdef WRITEBYSECTION
+! 	g_aSection.szzSections
+! 	?WritePrivateProfileStringSection(key,value,&g_aSection,1) 
+!  	:
+! #endif
+! 	WritePrivateProfileString(g_szSessionName,key,value,g_szIniFile); 
+!     } else
+! #endif
+!     if (handle) {
+! 	if (value)
+! 	  RegSetValueEx((HKEY) handle, key, 0, REG_SZ, value, 1 + strlen(value));
+!         else
+! 	  RegDeleteValue((HKEY) handle, key);
+!     }
+  }
+  
+  void write_setting_i(void *handle, const char *key, int value)
+  {
++ #ifdef SESSKEY_ASFILE
++     if (handle==SESSKEY_ASFILE) { 
++         char value1[32];
++ 	sprintf(value1,"%d",value);
++ #ifdef WRITEBYSECTION
++ 	g_aSection.szzSections
++   	  ?WritePrivateProfileStringSection(key,value1,&g_aSection,1) 
++ 	  :
++ #endif
++ 	  WritePrivateProfileString(g_szSessionName,key,value1,g_szIniFile); 
++     } else
++ #endif
+      if (handle)
+  	RegSetValueEx((HKEY) handle, key, 0, REG_DWORD,
+***************
+*** 123,126 ****
+--- 507,522 ----
+  void close_settings_w(void *handle)
+  {
++ #ifdef SESSKEY_ASFILE
++     if (handle==SESSKEY_ASFILE) {
++ #ifdef WRITEBYSECTION
++       if (g_aSection.szzSections != NULL) {
++ 	SortPrivateProfileSection(g_aSection.szzSections);
++         WritePrivateProfileSection(g_szSessionName,g_aSection.szzSections,g_szIniFile);
++         sfree(g_aSection.szzSections);
++         g_aSection.szzSections=NULL;
++       }
++ #endif
++     } else
++ #endif
+      RegCloseKey((HKEY) handle);
+  }
+***************
+*** 128,132 ****
+  void *open_settings_r(const char *sessionname)
+  {
+!     HKEY subkey1, sesskey;
+      char *p;
+  
+--- 524,528 ----
+  void *open_settings_r(const char *sessionname)
+  {
+!     HKEY sesskey;
+      char *p;
+  
+***************
+*** 137,140 ****
+--- 533,558 ----
+      mungestr(sessionname, p);
+  
++ #ifdef SESSKEY_ASFILE
++     sesskey = setiniinfo(p);
++     if (sesskey) {
++ 	sfree(p);
++         p=strdupGetPrivateProfileString("Settings","LocalReg",g_szIniFile);
++         if (!p) WritePrivateProfileString("Settings","LocalReg","none",g_szIniFile);
++ 	else {
++ 	    if (0==stricmp(p,"import")) CopyRegToINI(g_szIniFile);
++ 	    else if (0==stricmp(p,"export")) CopyINIToReg(g_szIniFile);
++ 	    if (0!=stricmp(p,"none")) WritePrivateProfileString("Settings","LocalReg","none",g_szIniFile);
++ 	    sfree(p);
++ 	}
++ 	if (NULL==(p=strdupGetPrivateProfileString("Settings","LocalRegHelp",g_szIniFile))) {
++ 	    WritePrivateProfileString("Settings","LocalRegHelp","LocalReg can be 'import' (from registry) 'export' (to registry), or 'none' (do nothing)",g_szIniFile);
++ 	    sfree(p);
++ 	}
++ 	return sesskey;
++     } else 
++ #endif
++     {
++     HKEY subkey1;
++ 
+      if (RegOpenKey(HKEY_CURRENT_USER, puttystr, &subkey1) != ERROR_SUCCESS) {
+  	sesskey = NULL;
+***************
+*** 149,177 ****
+  
+      return (void *) sesskey;
+  }
+  
+  char *read_setting_s(void *handle, const char *key)
+  {
+!     DWORD type, size;
+!     char *ret;
+! 
+!     if (!handle)
+! 	return NULL;
+! 
+!     /* Find out the type and size of the data. */
+!     if (RegQueryValueEx((HKEY) handle, key, 0,
+! 			&type, NULL, &size) != ERROR_SUCCESS ||
+! 	type != REG_SZ)
+! 	return NULL;
+! 
+!     ret = snewn(size+1, char);
+!     if (RegQueryValueEx((HKEY) handle, key, 0,
+! 			&type, ret, &size) != ERROR_SUCCESS ||
+! 	type != REG_SZ) {
+!         sfree(ret);
+!         return NULL;
+!     }
+! 
+!     return ret;
+  }
+  
+--- 567,582 ----
+  
+      return (void *) sesskey;
++     }
+  }
+  
+  char *read_setting_s(void *handle, const char *key)
+  {
+!      return
+! #ifdef SESSKEY_ASFILE
+!       (handle == SESSKEY_ASFILE)
+!       ?strdupGetPrivateProfileString(g_szSessionName,key,g_szIniFile)
+!       :
+! #endif
+!        strdupRegQueryValueEx(NULL, handle, key, REG_SZ, NULL);
+  }
+  
+***************
+*** 181,184 ****
+--- 586,598 ----
+      size = sizeof(val);
+  
++ #ifdef SESSKEY_ASFILE
++     if (handle==SESSKEY_ASFILE) {
++         char *value1=read_setting_s(handle,key);
++ 	int rv=(value1)?atoi(value1):defvalue;
++ 	sfree(value1);
++ 	return rv;
++     } else 
++ #endif
++     {
+      if (!handle ||
+  	RegQueryValueEx((HKEY) handle, key, 0, &type,
+***************
+*** 188,191 ****
+--- 602,606 ----
+      else
+  	return val;
++     }
+  }
+  
+***************
+*** 264,267 ****
+--- 679,685 ----
+  void close_settings_r(void *handle)
+  {
++ #ifdef SESSKEY_ASFILE
++     if (handle!=SESSKEY_ASFILE)
++ #endif
+      RegCloseKey((HKEY) handle);
+  }
+***************
+*** 269,274 ****
+  void del_settings(const char *sessionname)
+  {
+-     HKEY subkey1;
+      char *p;
+  
+      if (RegOpenKey(HKEY_CURRENT_USER, puttystr, &subkey1) != ERROR_SUCCESS)
+--- 687,701 ----
+  void del_settings(const char *sessionname)
+  {
+      char *p;
++ #ifdef SESSKEY_ASFILE
++     if (setiniinfo(NULL)) {
++         p = snewn(3 * strlen(sessionname) + 2, char);
++ 	*p=SESSION_LEADCHAR;
++         mungestr(sessionname, p+1);
++ 	WritePrivateProfileString(p,NULL,NULL,g_szIniFile);
++     } else 
++ #endif
++     {
++     HKEY subkey1;
+  
+      if (RegOpenKey(HKEY_CURRENT_USER, puttystr, &subkey1) != ERROR_SUCCESS)
+***************
+*** 278,285 ****
+      mungestr(sessionname, p);
+      RegDeleteKey(subkey1, p);
+-     sfree(p);
+  
+      RegCloseKey(subkey1);
+  
+      remove_session_from_jumplist(sessionname);
+  }
+--- 705,713 ----
+      mungestr(sessionname, p);
+      RegDeleteKey(subkey1, p);
+  
+      RegCloseKey(subkey1);
++     }
+  
++     sfree(p);
+      remove_session_from_jumplist(sessionname);
+  }
+***************
+*** 288,297 ****
+      HKEY key;
+      int i;
+  };
+  
+  void *enum_settings_start(void)
+  {
+-     struct enumsettings *ret;
+      HKEY key;
+  
+      if (RegOpenKey(HKEY_CURRENT_USER, puttystr, &key) != ERROR_SUCCESS)
+--- 716,738 ----
+      HKEY key;
+      int i;
++ #ifdef SESSKEY_ASFILE
++     char *enumsettingsini,*p;
++ #endif
+  };
+  
+  void *enum_settings_start(void)
+  {
+      HKEY key;
++     struct enumsettings *ret;
++ #ifdef SESSKEY_ASFILE
++     key=setiniinfo(NULL);
++     if (key) {
++         ret = snew(struct enumsettings);
++ 	ret->key=key;
++ 	ret->i = 0;
++ 	ret->p=ret->enumsettingsini=strdupGetPrivateProfileString(NULL,NULL,g_szIniFile);
++     } else 
++ #endif
++     {
+  
+      if (RegOpenKey(HKEY_CURRENT_USER, puttystr, &key) != ERROR_SUCCESS)
+***************
+*** 303,307 ****
+  	ret->i = 0;
+      }
+! 
+      return ret;
+  }
+--- 744,748 ----
+  	ret->i = 0;
+      }
+!     }
+      return ret;
+  }
+***************
+*** 310,313 ****
+--- 751,767 ----
+  {
+      struct enumsettings *e = (struct enumsettings *) handle;
++ #ifdef SESSKEY_ASFILE
++     if (e->key==SESSKEY_ASFILE) {
++ 	while (1) {
++ 	    if (!*e->p) return NULL;
++ 	    if (*e->p == SESSION_LEADCHAR) {
++ 		unmungestr(e->p+1,buffer,buflen);
++ 		e->p+=strlen(e->p)+1;
++ 		return buffer;
++ 	    } else e->p+=strlen(e->p)+1;
++ 	}
++     } else 
++ #endif
++     {
+      char *otherbuf;
+      otherbuf = snewn(3 * buflen, char);
+***************
+*** 320,323 ****
+--- 774,778 ----
+  	return NULL;
+      }
++     }
+  }
+  
+***************
+*** 325,341 ****
+  {
+      struct enumsettings *e = (struct enumsettings *) handle;
+      RegCloseKey(e->key);
+      sfree(e);
+  }
+  
+! static void hostkey_regname(char *buffer, const char *hostname,
+  			    int port, const char *keytype)
+  {
+!     int len;
+!     strcpy(buffer, keytype);
+!     strcat(buffer, "@");
+!     len = strlen(buffer);
+!     len += sprintf(buffer + len, "%d:", port);
+!     mungestr(hostname, buffer + strlen(buffer));
+  }
+  
+--- 780,806 ----
+  {
+      struct enumsettings *e = (struct enumsettings *) handle;
++ #ifdef SESSKEY_ASFILE
++     if (e->key==SESSKEY_ASFILE) {
++       sfree(e->enumsettingsini);
++     } else 
++ #endif
++     {
+      RegCloseKey(e->key);
++     }
+      sfree(e);
+  }
+  
+! /* strdup() like functions eliminate lots of code, are very secure, and 
+!  * make it obvious that the caller must free the buffer. All other functions
+!  * in the PuTTY sources that return a value to be free()'d should have
+!  * strdup_ added to the front. 
+!  */
+! static char *strdup_hostkey_regname(const char *hostname,
+  			    int port, const char *keytype)
+  {
+!     char *buffer=snewn(strlen(keytype)+1+5+1+3*strlen(hostname)+16,char);
+!     int len=sprintf(buffer,"%s@%u:",keytype,port);
+!     mungestr(hostname, buffer + len);
+!     return buffer;
+  }
+  
+***************
+*** 343,375 ****
+  		    const char *keytype, const char *key)
+  {
+!     char *otherstr, *regname;
+!     int len;
+!     HKEY rkey;
+!     DWORD readlen;
+!     DWORD type;
+!     int ret, compare;
+! 
+!     len = 1 + strlen(key);
+! 
+      /*
+!      * Now read a saved key in from the registry and see what it
+       * says.
+       */
+!     regname = snewn(3 * (strlen(hostname) + strlen(keytype)) + 15, char);
+! 
+!     hostkey_regname(regname, hostname, port, keytype);
+! 
+!     if (RegOpenKey(HKEY_CURRENT_USER, PUTTY_REG_POS "\\SshHostKeys",
+! 		   &rkey) != ERROR_SUCCESS) {
+!         sfree(regname);
+! 	return 1;		       /* key does not exist in registry */
+!     }
+! 
+!     readlen = len;
+!     otherstr = snewn(len, char);
+!     ret = RegQueryValueEx(rkey, regname, NULL, &type, otherstr, &readlen);
+! 
+!     if (ret != ERROR_SUCCESS && ret != ERROR_MORE_DATA &&
+! 	!strcmp(keytype, "rsa")) {
+  	/*
+  	 * Key didn't exist. If the key type is RSA, we'll try
+--- 808,840 ----
+  		    const char *keytype, const char *key)
+  {
+!     int rv=1; /* host key does not exist in registry */
+!     HKEY rkey=setiniinfo(NULL);
+      /*
+!      * Now read a saved host key in from the registry and see what it
+       * says.
+       */
+!     if (rkey || RegOpenKey(HKEY_CURRENT_USER, PUTTY_REG_POS "\\SshHostKeys",
+! 		   &rkey) == ERROR_SUCCESS) {
+!     char *regname = strdup_hostkey_regname(hostname, port, keytype);
+!     char *otherstr = 
+! #ifdef SESSKEY_ASFILE
+!       (rkey == SESSKEY_ASFILE)
+!       ?strdupGetPrivateProfileString("SshHostKeys",regname,g_szIniFile)
+!       :
+! #endif
+!        strdupRegQueryValueEx(NULL, rkey, regname, REG_SZ, NULL);
+! 
+! /* While I've fixed this code with the new strdup reg functions it doesn't work any more. 
+!  * This converts AAAABBBB/DDDDEEEEFFFF to 0xBBBBAAAA,0xFFFFEEEEDDDD. The conversion happens
+!  * in sets of 4 hex characters with any remainder drawing characters from outside the limits,
+!  * which for the first number only goes out of bounds into the second number. For the second 
+!  * number this would be a buffer overrun. Here's a sample SshHostKey in the new format:
+!  * 0x10001,0xc4f61b...
+!  * Note the 5 digit hex number. This routine with (ndigits/4) cannot produce a valid 5 digit hex number
+!  * anywhere. This code was only useful just after the format was updated. Years later it's 
+!  * completely useless and a security risk. -CJS 2014-04 */ 
+! #if 0
+!     if (!otherstr && rkey != SESSKEY_ASFILE && 
+! 	!strcmp(keytype, "rsa") || 1) {
+  	/*
+  	 * Key didn't exist. If the key type is RSA, we'll try
+***************
+*** 377,387 ****
+  	 * under just the hostname and translate that.
+  	 */
+! 	char *justhost = regname + 1 + strcspn(regname, ":");
+! 	char *oldstyle = snewn(len + 10, char);	/* safety margin */
+! 	readlen = len;
+! 	ret = RegQueryValueEx(rkey, justhost, NULL, &type,
+! 			      oldstyle, &readlen);
+  
+! 	if (ret == ERROR_SUCCESS && type == REG_SZ) {
+  	    /*
+  	     * The old format is two old-style bignums separated by
+--- 842,848 ----
+  	 * under just the hostname and translate that.
+  	 */
+! 	char *oldstyle = strdupRegQueryValueEx(NULL, rkey, regname + 1 + strcspn(regname, ":"), REG_SZ, NULL, NULL);
+  
+! 	if (oldstyle) {
+  	    /*
+  	     * The old format is two old-style bignums separated by
+***************
+*** 396,400 ****
+  	     * comma. All hex digits are lowercase in both formats.
+  	     */
+! 	    char *p = otherstr;
+  	    char *q = oldstyle;
+  	    int i, j;
+--- 857,861 ----
+  	     * comma. All hex digits are lowercase in both formats.
+  	     */
+! 	    char *p = otherstr = snewn(strlen(oldstyle)+16, char);
+  	    char *q = oldstyle;
+  	    int i, j;
+***************
+*** 429,451 ****
+  		RegSetValueEx(rkey, regname, 0, REG_SZ, otherstr,
+  			      strlen(otherstr) + 1);
+  	}
+- 
+-         sfree(oldstyle);
+      }
+  
+      RegCloseKey(rkey);
+- 
+-     compare = strcmp(otherstr, key);
+- 
+-     sfree(otherstr);
+      sfree(regname);
+  
+!     if (ret == ERROR_MORE_DATA ||
+! 	(ret == ERROR_SUCCESS && type == REG_SZ && compare))
+! 	return 2;		       /* key is different in registry */
+!     else if (ret != ERROR_SUCCESS || type != REG_SZ)
+! 	return 1;		       /* key does not exist in registry */
+!     else
+! 	return 0;		       /* key matched OK in registry */
+  }
+  
+--- 890,910 ----
+  		RegSetValueEx(rkey, regname, 0, REG_SZ, otherstr,
+  			      strlen(otherstr) + 1);
++ 	    sfree(oldstyle);
+  	}
+      }
++ #endif
+  
++ #ifdef SESSKEY_ASFILE
++     if (rkey != SESSKEY_ASFILE) 
++ #endif
+      RegCloseKey(rkey);
+      sfree(regname);
+  
+!     if (otherstr) {
+! 	rv = strcmp(otherstr, key)?2:0; /* 2=key is different in registry, 0=key matched OK in registry */
+! 	sfree(otherstr); 
+!     }
+!     }
+!     return rv;
+  }
+  
+***************
+*** 453,467 ****
+  		    const char *keytype, const char *key)
+  {
+-     char *regname;
+-     HKEY rkey;
+- 
+-     regname = snewn(3 * (strlen(hostname) + strlen(keytype)) + 15, char);
+  
+!     hostkey_regname(regname, hostname, port, keytype);
+  
+!     if (RegCreateKey(HKEY_CURRENT_USER, PUTTY_REG_POS "\\SshHostKeys",
+  		     &rkey) == ERROR_SUCCESS) {
+! 	RegSetValueEx(rkey, regname, 0, REG_SZ, key, strlen(key) + 1);
+! 	RegCloseKey(rkey);
+      } /* else key does not exist in registry */
+  
+--- 912,930 ----
+  		    const char *keytype, const char *key)
+  {
+  
+!     char *regname = strdup_hostkey_regname(hostname, port, keytype);
+  
+!     HKEY rkey = setiniinfo(NULL);
+!     if (rkey || RegCreateKey(HKEY_CURRENT_USER, PUTTY_REG_POS "\\SshHostKeys",
+  		     &rkey) == ERROR_SUCCESS) {
+! #ifdef SESSKEY_ASFILE
+! 	if (rkey == SESSKEY_ASFILE) {
+! 	  WritePrivateProfileString("SshHostKeys",regname,key,g_szIniFile);
+!         } else 
+! #endif
+! 	{
+! 	  RegSetValueEx(rkey, regname, 0, REG_SZ, key, strlen(key) + 1);
+! 	  RegCloseKey(rkey);
+!         }
+      } /* else key does not exist in registry */
+  
+***************
+*** 498,506 ****
+  static HANDLE access_random_seed(int action)
+  {
+-     HKEY rkey;
+-     DWORD type, size;
+      HANDLE rethandle;
+      char seedpath[2 * MAX_PATH + 10] = "\0";
+  
+      /*
+       * Iterate over a selection of possible random seed paths until
+--- 961,975 ----
+  static HANDLE access_random_seed(int action)
+  {
+      HANDLE rethandle;
++ 
+      char seedpath[2 * MAX_PATH + 10] = "\0";
+  
++     if (setiniinfo(NULL)) {
++ 	strcpy(seedpath,g_szIniFile);
++ 	strcpy(seedpath+strlen(seedpath)-4,".RND");
++ 	if (*seedpath && try_random_seed(seedpath, action, &rethandle)) return rethandle;
++     } else {
++     HKEY rkey;
++     DWORD type, size;
+      /*
+       * Iterate over a selection of possible random seed paths until
+***************
+*** 595,598 ****
+--- 1064,1068 ----
+       * If even that failed, give up.
+       */
++     }
+      return INVALID_HANDLE_VALUE;
+  }
+***************
+*** 768,772 ****
+  int add_to_jumplist_registry(const char *item)
+  {
+!     return transform_jumplist_registry(item, item, NULL);
+  }
+  
+--- 1238,1243 ----
+  int add_to_jumplist_registry(const char *item)
+  {
+! /* Crapping up the registry with this Jumplist isn't allowed if using an INI file. */
+!     return setiniinfo(NULL)?0:transform_jumplist_registry(item, item, NULL);
+  }
+  
+***************
+*** 774,778 ****
+  int remove_from_jumplist_registry(const char *item)
+  {
+!     return transform_jumplist_registry(NULL, item, NULL);
+  }
+  
+--- 1245,1249 ----
+  int remove_from_jumplist_registry(const char *item)
+  {
+!     return setiniinfo(NULL)?0:transform_jumplist_registry(NULL, item, NULL);
+  }
+  
+***************
+*** 783,787 ****
+      char *list_value;
+  
+!     if (transform_jumplist_registry(NULL,NULL,&list_value) != JUMPLISTREG_OK) {
+  	list_value = snewn(2, char);
+          *list_value = '\0';
+--- 1254,1258 ----
+      char *list_value;
+  
+!     if (setiniinfo(NULL) || transform_jumplist_registry(NULL,NULL,&list_value) != JUMPLISTREG_OK) {
+  	list_value = snewn(2, char);
+          *list_value = '\0';
+diff -r -C2 windows/winstuff.h.orig windows/winstuff.h
+*** windows/winstuff.h.orig	Mon Jul 22 03:11:39 2013
+--- windows/winstuff.h	Sun Apr 20 01:18:14 2014
+***************
+*** 10,13 ****
+--- 10,51 ----
+  #endif
+  #include <windows.h>
++ #ifndef VK_0 /* A little problem with MinGW here */
++ #define VK_0  0x30
++ #define VK_1  0x31
++ #define VK_2  0x32
++ #define VK_3  0x33
++ #define VK_4  0x34
++ #define VK_5  0x35
++ #define VK_6  0x36
++ #define VK_7  0x37
++ #define VK_8  0x38
++ #define VK_9  0x39
++ #define VK_A  0x41
++ #define VK_B  0x42
++ #define VK_C  0x43
++ #define VK_D  0x44
++ #define VK_E  0x45
++ #define VK_F  0x46
++ #define VK_G  0x47
++ #define VK_H  0x48
++ #define VK_I  0x49
++ #define VK_J  0x4A
++ #define VK_K  0x4B
++ #define VK_L  0x4C
++ #define VK_M  0x4D
++ #define VK_N  0x4E
++ #define VK_O  0x4F
++ #define VK_P  0x50
++ #define VK_Q  0x51
++ #define VK_R  0x52
++ #define VK_S  0x53
++ #define VK_T  0x54
++ #define VK_U  0x55
++ #define VK_V  0x56
++ #define VK_W  0x57
++ #define VK_X  0x58
++ #define VK_Y  0x59
++ #define VK_Z  0x5A
++ #endif
+  #include <stdio.h>		       /* for FILENAME_MAX */
+  
